@@ -170,18 +170,27 @@ class Config:
     fbref_crawl_delay: float = 3.0
     refit_after_days: int = 7
     log_level: str = "INFO"
+    # Which .env was read, if any. None means the settings below are pure
+    # defaults, which point at a local SQL Server that may not exist -- worth
+    # saying out loud rather than failing obscurely later.
+    env_file: Path | None = None
 
     @classmethod
     def load(cls, env_file: str | os.PathLike[str] | None = None) -> "Config":
         """Read .env (if present) and then the process environment."""
+        used: Path | None = None
         if env_file is not None:
-            load_dotenv(env_file, override=False)
+            candidate = Path(env_file)
+            if candidate.exists():
+                load_dotenv(candidate, override=False)
+                used = candidate
         else:
             # usecwd=True: search from where the command was run, not from the
             # installed package directory.
             found = find_dotenv(usecwd=True)
             if found:
                 load_dotenv(found, override=False)
+                used = Path(found)
         return cls(
             db=DbConfig.from_env(),
             model=ModelParams.from_env(),
@@ -193,7 +202,20 @@ class Config:
             fbref_crawl_delay=_env_float("CHAMP_FBREF_CRAWL_DELAY", 3.0),
             refit_after_days=_env_int("CHAMP_REFIT_AFTER_DAYS", 7),
             log_level=_env("CHAMP_LOG_LEVEL", "INFO"),
+            env_file=used,
         )
+
+    @property
+    def database_is_unconfigured(self) -> bool:
+        """True when nothing has said where the database is.
+
+        No .env and no CHAMP_DB_* in the environment means the defaults are in
+        play: a SQL Server on localhost:1433 with no credentials, which is
+        almost never what the user intended.
+        """
+        if self.env_file is not None:
+            return False
+        return not any(key.startswith("CHAMP_DB_") for key in os.environ)
 
     # -- derived paths -----------------------------------------------------
     @property

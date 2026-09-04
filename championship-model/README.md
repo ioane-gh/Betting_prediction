@@ -119,8 +119,8 @@ py -3 -m venv .venv
 python -m pip install --upgrade pip
 python -m pip install -e ".[dev,mssql]"    # add ,fbref for optional xG
 
-Copy-Item .env.example .env
-notepad .env                          # edit, see below
+Copy-Item .env.example .env           # required: without it you get
+notepad .env                          # SQL Server on localhost by default
 ```
 
 If activation fails with *"running scripts is disabled on this system"*, allow
@@ -136,7 +136,7 @@ Check the install:
 
 ```powershell
 champmodel version                    # champmodel 0.1.0 (model dc-0.1.0)
-pytest -q                             # 202 tests, ~19s, no database needed
+pytest -q                             # 210 tests, ~13s, no database needed
 ```
 
 > **The `champmodel` command only exists while the virtual environment is
@@ -309,7 +309,9 @@ pre-team-news product, and re-run `predict` by hand once you have line-ups.
 | symptom | cause and fix |
 |---|---|
 | `running scripts is disabled on this system` | `Set-ExecutionPolicy RemoteSigned -Scope CurrentUser`, then activate again |
-| `Can't open lib 'ODBC Driver 18 for SQL Server'` | driver not installed: `winget install --id Microsoft.msodbcsql.18`, or set `CHAMP_DB_DRIVER` to a name from `Get-OdbcDriver` |
+| `ModuleNotFoundError: No module named 'pyodbc'` | the Python driver was not installed — you ran `pip install -e ".[dev]"` without `,mssql`. Either add it, or switch to SQLite. See below the table |
+| `Can't open lib 'ODBC Driver 18 for SQL Server'` | the *system* ODBC driver is missing (different from pyodbc): `winget install --id Microsoft.msodbcsql.18`, or set `CHAMP_DB_DRIVER` to a name from `Get-OdbcDriver` |
+| `No .env found and no CHAMP_DB_* set` | there is no `.env`, so the defaults point at `localhost:1433`. `Copy-Item .env.example .env` and edit it |
 | `SSL Provider: certificate chain was issued by an authority that is not trusted` | a local instance with a self-signed certificate: keep `CHAMP_DB_TRUST_CERT=yes` |
 | `Login failed for user ''` | `CHAMP_DB_TRUSTED_CONNECTION=1` for your Windows login, or set `CHAMP_DB_USER` / `CHAMP_DB_PASSWORD` for SQL auth |
 | `server was not found or was not accessible` | wrong `CHAMP_DB_HOST`, or the SQL Browser service is stopped: `Get-Service MSSQL*, SQLBrowser` |
@@ -345,6 +347,40 @@ Whatever the cause, this always works and needs no activation:
 ```powershell
 .\.venv\Scripts\python.exe -m champmodel.cli init-db
 ```
+
+#### `No module named 'pyodbc'`
+
+`pyodbc` is the Python-side SQL Server driver, and it is an **optional** extra —
+`pip install -e ".[dev]"` leaves it out. Two ways forward.
+
+**Add it**, if you have SQL Server running:
+
+```powershell
+python -m pip install -e ".[dev,mssql]"
+```
+
+**Or skip SQL Server entirely** and use SQLite, which needs no driver at all.
+Put this one line in `.env`, replacing every `CHAMP_DB_*` line:
+
+```ini
+CHAMP_DB_URL=sqlite:///./data/champ.db
+```
+
+Then `champmodel init-db` and everything after it works unchanged. This is the
+faster route if what you want today is numbers rather than a database, and you
+can move to SQL Server later by swapping those lines back and re-running
+`init-db` and the backfill.
+
+Nothing about the model changes between the two — the same schema, the same
+queries, the same results. Only the storage engine differs.
+
+Two notes on `pyodbc`, if you do install it:
+
+- it needs the **system** ODBC driver as well, which is the separate
+  `winget install --id Microsoft.msodbcsql.18` step. `pyodbc` missing and the
+  ODBC driver missing are different errors with different fixes;
+- it publishes Windows wheels, so it should install without a compiler. If it
+  tries to build from source and fails, check `python --version` is 3.10-3.13.
 
 ### macOS and Linux
 
@@ -649,7 +685,7 @@ All of `.env` is documented in `.env.example`. The ones that matter:
 ## Tests
 
 ```powershell
-pytest -q          # 202 tests, ~19s. No database or network needed.
+pytest -q          # 210 tests, ~13s. No database or network needed.
 ```
 
 | file | what it guards |

@@ -215,3 +215,44 @@ def test_backtest_synthetic_mode_warns_that_it_is_not_real(project):
     output = _run("backtest", "--synthetic", "--seasons", "1",
                   "--refit-every", "21", "--no-calibrate").output
     assert "SYNTHETIC" in output
+
+
+def test_missing_driver_reports_cleanly_instead_of_a_traceback(project, monkeypatch):
+    """The failure a user hits before installing pyodbc must be a short,
+    actionable message and a non-zero exit -- not a rich traceback."""
+    from sqlalchemy.connectors.pyodbc import PyODBCConnector
+
+    def boom(cls):
+        raise ModuleNotFoundError("No module named 'pyodbc'", name="pyodbc")
+
+    monkeypatch.setattr(PyODBCConnector, "import_dbapi", classmethod(boom))
+    monkeypatch.setenv("CHAMP_DB_URL",
+                       "mssql+pyodbc://sa:x@localhost:1433/champ"
+                       "?driver=ODBC+Driver+18+for+SQL+Server")
+
+    result = runner.invoke(app, ["status"])
+    assert result.exit_code == 1
+    assert "pyodbc" in result.output
+    assert 'pip install -e ".[dev,mssql]"' in result.output
+    assert "sqlite:///./data/champ.db" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_unreachable_server_reports_cleanly(project, monkeypatch):
+    monkeypatch.setenv("CHAMP_DB_URL", "postgresql+psycopg2://x@127.0.0.1:1/none")
+    result = runner.invoke(app, ["status"])
+    assert result.exit_code == 1
+    assert "could not connect to" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_no_env_file_warns_before_using_the_defaults(tmp_path, monkeypatch):
+    """Silently falling back to localhost:1433 is how a user ends up debugging
+    a connection they never configured."""
+    monkeypatch.chdir(tmp_path)
+    for key in [k for k in os.environ if k.startswith("CHAMP_DB_")]:
+        monkeypatch.delenv(key, raising=False)
+
+    result = runner.invoke(app, ["status"])
+    assert "No .env found" in result.output
+    assert ".env.example" in result.output

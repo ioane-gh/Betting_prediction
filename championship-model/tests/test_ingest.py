@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import os
 from pathlib import Path
 
 import pandas as pd
@@ -344,3 +345,68 @@ def test_redacted_url_covers_trusted_connections():
     shown = DbConfig(host=r"(localdb)\MSSQLLocalDB", trusted_connection=True).redacted_url()
     assert "(trusted)" in shown
     assert "PWD" not in shown
+
+
+# -- configuration errors report, they do not crash -------------------------
+def _break_pyodbc_import(monkeypatch, module_name: str) -> None:
+    """Make SQLAlchemy's pyodbc connector fail exactly as it does when the
+    driver is absent -- the code path from the real traceback."""
+    from sqlalchemy.connectors.pyodbc import PyODBCConnector
+
+    def boom(cls):
+        raise ModuleNotFoundError(f"No module named {module_name!r}", name=module_name)
+
+    monkeypatch.setattr(PyODBCConnector, "import_dbapi", classmethod(boom))
+
+
+def test_missing_pyodbc_raises_an_actionable_error(monkeypatch):
+    """A missing optional driver is an expected setup state, not a bug. It has
+    to say what to install and what the alternative is."""
+    from champmodel.db import DriverNotInstalled, make_engine
+
+    _break_pyodbc_import(monkeypatch, "pyodbc")
+    with pytest.raises(DriverNotInstalled) as excinfo:
+        make_engine(DbConfig(host="localhost", user="sa", password="x"))
+
+    message = str(excinfo.value)
+    assert "pyodbc" in message
+    assert 'pip install -e ".[dev,mssql]"' in message
+    assert "sqlite:///./data/champ.db" in message      # the way out
+
+
+def test_a_different_missing_module_is_not_swallowed(monkeypatch):
+    from champmodel.db import DriverNotInstalled, make_engine
+
+    _break_pyodbc_import(monkeypatch, "somethingelse")
+    with pytest.raises(ModuleNotFoundError) as excinfo:
+        make_engine(DbConfig(host="localhost", user="sa", password="x"))
+    assert not isinstance(excinfo.value, DriverNotInstalled)
+
+
+def test_sqlite_needs_no_driver():
+    """The documented fallback must work in an environment with no pyodbc."""
+    from champmodel.db import create_schema, make_engine
+
+    engine = make_engine(DbConfig(url="sqlite://"))
+    create_schema(engine)
+    engine.dispose()
+
+
+def test_config_records_which_env_file_it_read(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    assert Config.load().env_file is None
+
+    (tmp_path / ".env").write_text("CHAMP_LOG_LEVEL=ERROR\n", encoding="utf-8")
+    assert Config.load().env_file is not None
+
+
+def test_unconfigured_database_is_detectable(tmp_path, monkeypatch):
+    """No .env and no CHAMP_DB_* means the defaults are silently pointing at a
+    local SQL Server. The CLI warns rather than failing obscurely later."""
+    monkeypatch.chdir(tmp_path)
+    for key in [k for k in os.environ if k.startswith("CHAMP_DB_")]:
+        monkeypatch.delenv(key, raising=False)
+    assert Config.load().database_is_unconfigured
+
+    monkeypatch.setenv("CHAMP_DB_URL", "sqlite://")
+    assert not Config.load().database_is_unconfigured

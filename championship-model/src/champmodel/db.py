@@ -32,6 +32,14 @@ from .logging_setup import get_logger
 
 log = get_logger(__name__)
 
+class DriverNotInstalled(RuntimeError):
+    """The database driver for the configured URL is not installed.
+
+    Raised instead of a bare ModuleNotFoundError so the CLI can print
+    something a user can act on rather than a stack trace.
+    """
+
+
 SCHEMA = "champ"
 metadata = sa.MetaData(schema=SCHEMA)
 
@@ -192,7 +200,21 @@ def make_engine(db: DbConfig | None = None, *, echo: bool = False) -> Engine:
         kwargs["fast_executemany"] = True
         kwargs["pool_pre_ping"] = True
 
-    engine = sa.create_engine(url, **kwargs)
+    try:
+        engine = sa.create_engine(url, **kwargs)
+    except ModuleNotFoundError as exc:
+        if exc.name != "pyodbc":
+            raise
+        raise DriverNotInstalled(
+            "SQL Server support needs the pyodbc driver, which is not installed "
+            "in this environment.\n\n"
+            "Either install it:\n"
+            '    python -m pip install -e ".[dev,mssql]"\n\n'
+            "or run on SQLite instead, which needs no driver -- put this in "
+            ".env in place of the CHAMP_DB_* lines:\n"
+            "    CHAMP_DB_URL=sqlite:///./data/champ.db"
+        ) from exc
+
     if url.startswith("sqlite"):
         _attach_sqlite_schema(engine, url)
     log.debug("engine created", extra={"dialect": engine.dialect.name})

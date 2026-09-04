@@ -56,6 +56,33 @@ def _echo_err(message: str) -> None:
     typer.secho(message, fg=typer.colors.RED, err=True)
 
 
+def _engine(cfg: Config):
+    """Build the engine, reporting configuration problems as messages.
+
+    A missing driver or an unreachable server is a setup mistake, not a bug,
+    and a forty-line rich traceback buries the one line that says what to do
+    about it.
+    """
+    from .db import DriverNotInstalled, make_engine
+
+    if cfg.database_is_unconfigured:
+        typer.secho(
+            "No .env found and no CHAMP_DB_* set, so the built-in defaults are "
+            "in use: SQL Server on localhost:1433 with no credentials.\n"
+            "Create one with `Copy-Item .env.example .env` (PowerShell) or "
+            "`cp .env.example .env`, then edit it.",
+            fg=typer.colors.YELLOW, err=True,
+        )
+    try:
+        return make_engine(cfg.db)
+    except DriverNotInstalled as exc:
+        _echo_err(str(exc))
+        raise typer.Exit(code=1) from exc
+    except Exception as exc:  # bad URL, unreachable host, wrong driver name
+        _echo_err(f"could not connect to {cfg.db.redacted_url()}\n  {exc}")
+        raise typer.Exit(code=1) from exc
+
+
 # --------------------------------------------------------------------------
 @app.command("version")
 def version_cmd() -> None:
@@ -68,12 +95,12 @@ def init_db_cmd(
     seed_teams: bool = typer.Option(True, help="Also populate dim_team and team_alias."),
 ) -> None:
     """Create the champ schema, then seed the canonical team registry."""
-    from .db import create_schema, make_engine
+    from .db import create_schema
     from .ingest.teams import TeamRegistry
 
     cfg = _load_config()
     typer.echo(f"connecting to {cfg.db.redacted_url()}")
-    engine = make_engine(cfg.db)
+    engine = _engine(cfg)
     create_schema(engine)
     typer.secho("schema applied", fg=typer.colors.GREEN)
     if seed_teams:
@@ -95,7 +122,6 @@ def ingest_cmd(
     window_days: int = typer.Option(0, help="Fixture window either side of the date."),
 ) -> None:
     """Load results, fixtures, availability and (optionally) xG."""
-    from .db import make_engine
     from .ingest import availability as availability_mod
     from .ingest import fbref, footballdata_org, footballdata_uk
     from .ingest.seasons import recent_start_years
@@ -105,7 +131,7 @@ def ingest_cmd(
     if not backfill and not today:
         backfill = today = True
 
-    engine = make_engine(cfg.db)
+    engine = _engine(cfg)
     failures: list[str] = []
 
     with engine.begin() as conn:
@@ -194,7 +220,6 @@ def fit_cmd(
     """Fit the Dixon-Coles model and store it under data/artifacts."""
     from tabulate import tabulate
 
-    from .db import make_engine
     from .model.dixon_coles import fit_dixon_coles
     from .repository import load_matches
 
@@ -202,7 +227,7 @@ def fit_cmd(
     params = cfg.model if half_life is None else cfg.model.replace(decay_half_life_days=half_life)
     cutoff = _parse_date(until) if until else dt.date.today()
 
-    engine = make_engine(cfg.db)
+    engine = _engine(cfg)
     with engine.connect() as conn:
         matches = load_matches(conn, finished_only=True, until=cutoff, with_odds=False)
     if matches.empty:
@@ -243,7 +268,6 @@ def backtest_cmd(
     from .backtest.metrics import format_report, summarise
     from .backtest.walk_forward import (apply_calibration, assert_no_leakage,
                                         split_calibration, walk_forward)
-    from .db import make_engine
     from .features.h2h import H2HIndex
     from .model.pipeline import make_h2h_adjuster
     from .repository import load_matches
@@ -257,7 +281,7 @@ def backtest_cmd(
                     "machinery, not the Championship", fg=typer.colors.YELLOW)
         matches = synth.generate(n_seasons=max(seasons + 2, 4)).matches
     else:
-        engine = make_engine(cfg.db)
+        engine = _engine(cfg)
         with engine.connect() as conn:
             matches = load_matches(conn, finished_only=True)
         if matches.empty:
@@ -326,7 +350,6 @@ def tune_cmd(
     from tabulate import tabulate
 
     from .backtest.walk_forward import grid_search
-    from .db import make_engine
     from .repository import load_matches
 
     cfg = _load_config()
@@ -336,7 +359,7 @@ def tune_cmd(
                     "generator, not the Championship", fg=typer.colors.YELLOW)
         matches = synth.generate(n_seasons=seasons + 2).matches
     else:
-        engine = make_engine(cfg.db)
+        engine = _engine(cfg)
         with engine.connect() as conn:
             matches = load_matches(conn, finished_only=True)
         if matches.empty:
@@ -382,7 +405,6 @@ def predict_cmd(
     """The daily run: fixtures in, probabilities out."""
     from tabulate import tabulate
 
-    from .db import make_engine
     from .features.availability_adj import build_index
     from .features.h2h import H2HIndex
     from .ingest import availability as availability_mod
@@ -398,7 +420,7 @@ def predict_cmd(
     cfg = _load_config()
     day = _parse_date(date)
     params = cfg.model
-    engine = make_engine(cfg.db)
+    engine = _engine(cfg)
     degraded: list[str] = []
 
     with engine.begin() as conn:
@@ -628,12 +650,11 @@ def status_cmd() -> None:
     """Row counts, the stored fit, and the alias gate."""
     from tabulate import tabulate
 
-    from .db import make_engine
     from .model.dixon_coles import DixonColesFit
     from .repository import counts, latest_run, unresolved_alias_count
 
     cfg = _load_config()
-    engine = make_engine(cfg.db)
+    engine = _engine(cfg)
     with engine.connect() as conn:
         row_counts = counts(conn)
         run = latest_run(conn)
