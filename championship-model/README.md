@@ -334,6 +334,7 @@ pre-team-news product, and re-run `predict` by hand once you have line-ups.
 | `ModuleNotFoundError: No module named 'pyodbc'` | the Python driver was not installed — you ran `pip install -e ".[dev]"` without `,mssql`. Either add it, or switch to SQLite. See below the table |
 | `Can't open lib 'ODBC Driver 18 for SQL Server'` | the *system* ODBC driver is missing (different from pyodbc): `winget install --id Microsoft.msodbcsql.18`, or set `CHAMP_DB_DRIVER` to a name from `Get-OdbcDriver` |
 | `No .env found and no CHAMP_DB_* set` | there is no `.env`, so the defaults point at `localhost:1433`. `Copy-Item .env.example .env` and edit it |
+| `AttributeError: module 'champmodel...' has no attribute '...'` | Python is loading a *different* `champmodel` than the one in `src/`. See below the table |
 | `SSL Provider: certificate chain was issued by an authority that is not trusted` | a local instance with a self-signed certificate: keep `CHAMP_DB_TRUST_CERT=yes` |
 | `Login failed for user ''` | `CHAMP_DB_TRUSTED_CONNECTION=1` for your Windows login, or set `CHAMP_DB_USER` / `CHAMP_DB_PASSWORD` for SQL auth |
 | `server was not found or was not accessible` | wrong `CHAMP_DB_HOST`, or the SQL Browser service is stopped: `Get-Service MSSQL*, SQLBrowser` |
@@ -403,6 +404,36 @@ Two notes on `pyodbc`, if you do install it:
   ODBC driver missing are different errors with different fixes;
 - it publishes Windows wheels, so it should install without a compiler. If it
   tries to build from source and fails, check `python --version` is 3.10-3.13.
+
+#### `AttributeError: module 'champmodel...' has no attribute '...'`
+
+This means an import succeeded, but the module it found is not the one in your
+`src/` folder — usually because the project directory was moved or re-copied
+after the virtualenv was created, and the editable install still points at the
+old location.
+
+Find out which copy is actually loaded:
+
+```powershell
+python -c "import champmodel.ingest.availability as m; print(m.__file__)"
+```
+
+If that path is not under this project's `src\champmodel\`, reinstall the
+editable package so it points here:
+
+```powershell
+python -m pip uninstall champmodel -y
+python -m pip install -e ".[dev]"      # add ,mssql if you use SQL Server
+```
+
+If the path *is* correct but the function is still missing, your checkout is
+behind the repository — confirm with `git log -1` and `git status`, then
+`git fetch origin` and `git reset --hard origin/<branch>`. And if neither
+explains it, a stale bytecode cache is cheap to rule out:
+
+```powershell
+Get-ChildItem -Recurse -Directory -Filter __pycache__ | Remove-Item -Recurse -Force
+```
 
 ### macOS and Linux
 
