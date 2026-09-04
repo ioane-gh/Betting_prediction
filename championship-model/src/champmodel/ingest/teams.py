@@ -62,6 +62,13 @@ def normalise(name: str) -> str:
 # canonical name -> extra spellings seen in the wild.
 # football-data.co.uk uses the short forms; football-data.org uses the long
 # official names (which normalise cleanly); FBref sits in between.
+#
+# The registry deliberately reaches beyond the Championship. Three or four
+# clubs come down from the Premier League and three go up from League One every
+# summer, and an unmapped name is a hard failure that stops the whole backfill.
+# Since E1.csv only ever contains Championship matches, a club that never
+# reaches the division simply never appears -- an unused entry costs nothing,
+# whereas a missing one costs a failed ingest at the worst moment.
 ALIASES: dict[str, tuple[str, ...]] = {
     "Aston Villa": (),
     "Barnsley": (),
@@ -113,6 +120,55 @@ ALIASES: dict[str, tuple[str, ...]] = {
     "Wolverhampton Wanderers": ("Wolves",),
     "Wrexham": (),
     "Wycombe Wanderers": ("Wycombe",),
+
+    # -- Premier League clubs, in case one is relegated into the division ---
+    "Arsenal": (),
+    "Chelsea": (),
+    "Crystal Palace": ("Palace",),
+    "Everton": (),
+    "Liverpool": (),
+    "Manchester City": ("Man City",),
+    "Manchester United": ("Man United", "Man Utd"),
+    "Tottenham Hotspur": ("Tottenham", "Spurs"),
+    "West Ham United": ("West Ham",),
+
+    # -- League One and Two, in case one is promoted into the division ------
+    "Accrington Stanley": ("Accrington",),
+    "Barrow": (),
+    "Bradford City": ("Bradford",),
+    "Bromley": (),
+    "Cambridge United": ("Cambridge",),
+    "Carlisle United": ("Carlisle",),
+    "Cheltenham Town": ("Cheltenham",),
+    "Chesterfield": (),
+    "Colchester United": ("Colchester",),
+    "Crawley Town": ("Crawley",),
+    "Crewe Alexandra": ("Crewe",),
+    "Doncaster Rovers": ("Doncaster",),
+    "Exeter City": ("Exeter",),
+    "Fleetwood Town": ("Fleetwood",),
+    "Gillingham": (),
+    "Grimsby Town": ("Grimsby",),
+    "Harrogate Town": ("Harrogate",),
+    "Leyton Orient": ("Orient",),
+    "Lincoln City": ("Lincoln",),
+    "Mansfield Town": ("Mansfield",),
+    "Morecambe": (),
+    "Newport County": ("Newport",),
+    "Northampton Town": ("Northampton",),
+    "Notts County": (),
+    "Port Vale": (),
+    "Salford City": ("Salford",),
+    "Scunthorpe United": ("Scunthorpe",),
+    "Shrewsbury Town": ("Shrewsbury",),
+    "Southend United": ("Southend",),
+    "Stevenage": (),
+    "Stockport County": ("Stockport",),
+    "Swindon Town": ("Swindon",),
+    "Tranmere Rovers": ("Tranmere",),
+    "Walsall": (),
+    "AFC Wimbledon": ("Wimbledon",),
+    "Yeovil Town": ("Yeovil",),
 }
 
 CANONICAL_NAMES: tuple[str, ...] = tuple(sorted(ALIASES))

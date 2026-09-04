@@ -410,3 +410,67 @@ def test_unconfigured_database_is_detectable(tmp_path, monkeypatch):
 
     monkeypatch.setenv("CHAMP_DB_URL", "sqlite://")
     assert not Config.load().database_is_unconfigured
+
+
+# -- a season that is not published yet must degrade, not crash -------------
+def test_an_html_error_page_is_not_cached(tmp_path):
+    """football-data.co.uk can answer 200 with an error page. Caching that
+    would poison every later run, and parsing it would KeyError several frames
+    deep."""
+    from champmodel.ingest.footballdata_uk import SeasonFileUnusable
+
+    class ErrorPage:
+        @staticmethod
+        def get(*_args, **_kwargs):
+            class R:
+                content = b"<html><body>404 Not Found</body></html>"
+                status_code = 200
+
+                @staticmethod
+                def raise_for_status():
+                    return None
+            return R()
+
+    with pytest.raises(SeasonFileUnusable):
+        download_season(2026, tmp_path, session=ErrorPage())
+    assert not (tmp_path / "E1_2627.csv").exists()
+
+
+def test_a_csv_without_result_columns_is_rejected(tmp_path):
+    from champmodel.ingest.footballdata_uk import SeasonFileUnusable
+
+    path = tmp_path / "E1_2627.csv"
+    path.write_text("Div,Date,Something\nE1,09/08/2026,x\n", encoding="utf-8")
+    with pytest.raises(SeasonFileUnusable, match="missing the column"):
+        read_season_csv(path)
+
+
+def test_backfill_records_a_missing_season_and_keeps_going(engine, tmp_path):
+    """The current season often has no file yet. That is a degraded input to
+    record, not a reason to abandon nine good seasons."""
+    from champmodel.ingest.footballdata_uk import backfill
+
+    (tmp_path / "E1_2526.csv").write_bytes(FIXTURE.read_bytes())
+    (tmp_path / "E1_2627.csv").write_text("<html>nope</html>", encoding="utf-8")
+
+    with engine.begin() as conn:
+        report = backfill(conn, TeamRegistry.sync(conn), [2025, 2026], tmp_path,
+                          max_age_days=-1)
+
+    assert report.seasons_loaded == [2025]
+    assert 2026 in report.seasons_failed
+    assert report.matches == 4
+    assert not report.ok            # surfaced to the user, not swallowed
+
+
+def test_backfill_still_hard_fails_on_an_unmapped_team(engine, tmp_path):
+    """Degrading on a missing file must not soften the alias rule."""
+    from champmodel.ingest.footballdata_uk import backfill
+    from champmodel.ingest.teams import UnknownTeamError
+
+    text = FIXTURE.read_text(encoding="latin-1").replace("Sheffield Weds", "Real Madrid")
+    (tmp_path / "E1_2526.csv").write_text(text, encoding="latin-1")
+
+    with engine.begin() as conn:
+        with pytest.raises(UnknownTeamError):
+            backfill(conn, TeamRegistry.sync(conn), [2025], tmp_path, max_age_days=-1)

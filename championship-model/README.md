@@ -136,7 +136,7 @@ Check the install:
 
 ```powershell
 champmodel version                    # champmodel 0.1.0 (model dc-0.1.0)
-pytest -q                             # 210 tests, ~13s, no database needed
+pytest -q                             # 214 tests, ~13s, no database needed
 ```
 
 > **The `champmodel` command only exists while the virtual environment is
@@ -192,7 +192,7 @@ Get the free football-data.org key at
 minute or two. The historical backfill does not need it; only today's fixtures
 do.
 
-### No SQL Server? Run on SQLite
+### Running on SQLite (no SQL Server, no ODBC driver)
 
 The whole pipeline works on SQLite, which is how the tests run. Put this in
 `.env` **instead of** the `CHAMP_DB_*` lines above and skip the ODBC install:
@@ -209,6 +209,28 @@ expected, not a bug: SQL Server puts everything in a `champ` schema, and SQLite
 reaches a schema through `ATTACH DATABASE`, which is a second file. Keeping the
 two backends on one set of table definitions is what lets the test suite run
 without SQL Server. Back up or delete both together.
+
+The whole SQLite run, start to finish:
+
+```powershell
+cd path\to\championship-model
+.\.venv\Scripts\Activate.ps1
+
+"CHAMP_DB_URL=sqlite:///./data/champ.db" | Out-File -Encoding utf8 .env
+champmodel init-db                    # ~50 teams seeded, schema created
+
+champmodel ingest --backfill          # 10 seasons. Minutes, and the first
+                                      # step that needs the internet.
+champmodel status                     # expect ~5,500 finished matches
+champmodel backtest --seasons 3       # the acceptance test -- read Phase 7
+champmodel fit                        # store the model
+
+champmodel predict --date today       # needs a football-data.org key
+```
+
+Only the last step needs `FOOTBALL_DATA_ORG_KEY` in `.env` — the fixture list
+comes from a different source than the history. Everything up to and including
+`backtest` runs on football-data.co.uk alone, which needs no key at all.
 
 ### Create the schema
 
@@ -685,7 +707,7 @@ All of `.env` is documented in `.env.example`. The ones that matter:
 ## Tests
 
 ```powershell
-pytest -q          # 210 tests, ~13s. No database or network needed.
+pytest -q          # 214 tests, ~13s. No database or network needed.
 ```
 
 | file | what it guards |

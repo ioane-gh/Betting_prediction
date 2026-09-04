@@ -39,6 +39,20 @@ class SourceUnavailable(RuntimeError):
     """The source could not be reached and no usable cache exists."""
 
 
+class SeasonFileUnusable(SourceUnavailable):
+    """The file downloaded is not an E1 results CSV.
+
+    A season that has not started yet, or a server error page served with a
+    200, both land here. Subclassing SourceUnavailable means the backfill
+    records the season as missing and carries on, rather than dying on a
+    KeyError several frames later.
+    """
+
+
+# Present in every E1.csv since 1993. Their absence means this is not one.
+REQUIRED_COLUMNS = ("Date", "HomeTeam", "AwayTeam", "FTHG", "FTAG")
+
+
 @dataclass
 class IngestReport:
     """What actually made it in, and what did not."""
@@ -115,15 +129,25 @@ def download_season(
         response.raise_for_status()
         if not response.content.strip():
             raise SourceUnavailable(f"{url} returned an empty body")
+        if b"HomeTeam" not in response.content[:4096]:
+            # An error page served with a 200, or a season not published yet.
+            # Caching it would poison every later run.
+            raise SeasonFileUnusable(
+                f"{url} did not return a results CSV "
+                f"(no HomeTeam column in the first 4KB)"
+            )
         path.write_bytes(response.content)
         log.info("downloaded season file",
                  extra={"season": start_year, "bytes": len(response.content)})
         return path
     except Exception as exc:  # network, HTTP, proxy policy -- all the same here
+        # A previously good copy beats a failed refresh, whatever the cause.
         if path.exists() and path.stat().st_size > 0:
             log.warning("download failed, falling back to stale cache",
                         extra={"season": start_year, "error": str(exc)})
             return path
+        if isinstance(exc, SourceUnavailable):
+            raise          # already says exactly what went wrong
         raise SourceUnavailable(f"could not fetch {url}: {exc}") from exc
 
 
@@ -225,7 +249,16 @@ def _to_float(value: Any) -> float | None:
 def read_season_csv(path: Path) -> pd.DataFrame:
     """Load one E1.csv, dropping the blank trailing rows the files carry."""
     raw = path.read_bytes()
-    df = pd.read_csv(io.BytesIO(raw), encoding="latin-1", on_bad_lines="skip")
+    try:
+        df = pd.read_csv(io.BytesIO(raw), encoding="latin-1", on_bad_lines="skip")
+    except Exception as exc:
+        raise SeasonFileUnusable(f"{path.name} is not parseable as CSV: {exc}") from exc
+    missing = [c for c in REQUIRED_COLUMNS if c not in df.columns]
+    if missing:
+        raise SeasonFileUnusable(
+            f"{path.name} is missing the column(s) {missing}. Delete it from "
+            f"data/raw and re-run; the season may not have started yet."
+        )
     df = df.dropna(subset=["HomeTeam", "AwayTeam"], how="any")
     df = df[df["HomeTeam"].astype(str).str.strip() != ""]
     return df.reset_index(drop=True)
@@ -380,10 +413,12 @@ def backfill(
         try:
             path = download_season(start_year, raw_dir, max_age_days=max_age_days,
                                    session=session)
+            # UnknownTeamError is not caught here on purpose: an unmapped club
+            # is a hard failure, not a degraded input.
+            load_season(conn, registry, start_year, path, report)
         except SourceUnavailable as exc:
             log.warning("season unavailable", extra={"season": start_year, "error": str(exc)})
             report.seasons_failed[start_year] = str(exc)
             continue
-        load_season(conn, registry, start_year, path, report)
     log.info("historical backfill complete", extra={"summary": report.summary()})
     return report
