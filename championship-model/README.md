@@ -93,14 +93,31 @@ winget install --id Microsoft.msodbcsql.18
 
 ### Set the project up
 
-```powershell
-cd championship-model
+The project lives in the `championship-model` **subdirectory** of the
+repository, and every command below is run from there:
 
+```powershell
+# Already cloned? Just cd into it and skip to the next block.
+git clone https://github.com/ioane-gh/Betting_prediction.git
+cd Betting_prediction\championship-model
+
+# You should see the project files here:
+Get-ChildItem                         # pyproject.toml, sql, src, tests
+```
+
+The code currently sits on the branch
+`claude/championship-btts-over-engine-pw6542`, which is the repository's
+default, so a plain clone lands on it. If that stops being the default, add
+`-b claude/championship-btts-over-engine-pw6542` to the clone.
+
+Create the virtual environment and install the package into it:
+
+```powershell
 py -3 -m venv .venv
-.\.venv\Scripts\Activate.ps1
+.\.venv\Scripts\Activate.ps1        # your prompt should now start with (.venv)
 
 python -m pip install --upgrade pip
-pip install -e ".[dev,mssql]"        # add ,fbref for optional xG
+python -m pip install -e ".[dev,mssql]"    # add ,fbref for optional xG
 
 Copy-Item .env.example .env
 notepad .env                          # edit, see below
@@ -113,17 +130,33 @@ signed local scripts for your user once — this does not need an admin prompt:
 Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
 ```
 
-Then `.\.venv\Scripts\Activate.ps1` again. Your prompt should read `(.venv)`.
+Then run `.\.venv\Scripts\Activate.ps1` again.
 
 Check the install:
 
 ```powershell
-champmodel --help
+champmodel version                    # champmodel 0.1.0 (model dc-0.1.0)
 pytest -q                             # 202 tests, ~19s, no database needed
 ```
 
-`champmodel` is also runnable as `python -m champmodel.cli`, which is useful if
-the `Scripts` directory is not on `PATH`.
+> **The `champmodel` command only exists while the virtual environment is
+> active.** Activation lasts for one terminal session, so **every new
+> PowerShell window needs `.\.venv\Scripts\Activate.ps1` again**. Forgetting
+> that is the single most common way to get
+> `champmodel : The term 'champmodel' is not recognized`. See
+> **Troubleshooting** below for a one-line diagnosis.
+
+If you would rather not think about activation at all, this form works from any
+shell, in any directory, without it — it just needs the full path to the
+project's own Python:
+
+```powershell
+C:\path\to\championship-model\.venv\Scripts\python.exe -m champmodel.cli version
+```
+
+Run it from the project directory and `.\.venv\Scripts\python.exe -m
+champmodel.cli` is enough. That is also the form the Scheduled Task below uses,
+for exactly this reason.
 
 ### Configure `.env`
 
@@ -283,9 +316,35 @@ pre-team-news product, and re-run `predict` by hand once you have line-ups.
 | `Cannot open database "champ" requested by the login` | create the database first, see **Create the schema** |
 | `could not find 001_schema.sql` | installed non-editable; re-run `pip install -e ".[dev,mssql]"` or apply the DDL with `sqlcmd` |
 | `python` opens the Microsoft Store | use `py -3` instead, or turn off the App Execution Alias in Settings |
-| `champmodel : command not found` | virtualenv not activated, or use `python -m champmodel.cli` |
+| `champmodel : The term 'champmodel' is not recognized` | almost always the virtualenv is not active in this window. See below the table |
 | ingest exits with code 2 | a team name did not resolve — the message names it. Add it to `ALIASES` in `champmodel/ingest/teams.py`. This is deliberate; see below |
 | every row flagged `uncalibrated` | run `champmodel backtest` once to produce the calibration artifact |
+
+#### `champmodel` is not recognized
+
+Four lines that say which of the three causes it is:
+
+```powershell
+Get-Location                          # must end in \championship-model
+Test-Path .\pyproject.toml            # must be True
+$env:VIRTUAL_ENV                      # empty means the venv is NOT active
+python -m pip show champmodel         # blank means it is not installed here
+```
+
+- **`$env:VIRTUAL_ENV` is empty** — the usual case, and it happens every time
+  you open a new terminal. Run `.\.venv\Scripts\Activate.ps1`.
+- **`pip show` prints nothing** — the install never ran, or it failed. Run
+  `python -m pip install -e ".[dev,mssql]"` again and read the output. If
+  `pyodbc` is what fails, drop it: `python -m pip install -e ".[dev]"` and use
+  the SQLite configuration.
+- **`Test-Path` is False** — you are in the repository root. The project is in
+  the `championship-model` subdirectory: `cd championship-model`.
+
+Whatever the cause, this always works and needs no activation:
+
+```powershell
+.\.venv\Scripts\python.exe -m champmodel.cli init-db
+```
 
 ### macOS and Linux
 
