@@ -60,13 +60,27 @@ class DbConfig:
             url=_env("CHAMP_DB_URL"),
         )
 
+    @property
+    def server(self) -> str:
+        """The ODBC SERVER value.
+
+        A named instance (``.\\SQLEXPRESS``) or LocalDB
+        (``(localdb)\\MSSQLLocalDB``) is resolved by instance name through the
+        SQL Browser service, not by port, and appending one stops the
+        connection working at all. Only a plain host takes ``,port``.
+        """
+        host = self.host.strip()
+        if "\\" in host or host.lower().startswith("(localdb)") or self.port <= 0:
+            return host
+        return f"{host},{self.port}"
+
     def sqlalchemy_url(self) -> str:
         """Build a ``mssql+pyodbc`` URL, unless CHAMP_DB_URL was given."""
         if self.url:
             return self.url
         odbc_parts = [
             f"DRIVER={{{self.driver}}}",
-            f"SERVER={self.host},{self.port}",
+            f"SERVER={self.server}",
             f"DATABASE={self.name}",
         ]
         if self.trusted_connection:
@@ -83,8 +97,9 @@ class DbConfig:
         """The connection URL with the password blanked, safe for logs."""
         if self.url:
             return self.url
+        who = "(trusted)" if self.trusted_connection else f"{self.user}:***"
         return (
-            f"mssql+pyodbc://{self.user}:***@{self.host}:{self.port}/{self.name}"
+            f"mssql+pyodbc://{who}@{self.server}/{self.name}"
             f"?driver={urllib.parse.quote_plus(self.driver)}"
         )
 

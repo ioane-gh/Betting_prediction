@@ -240,6 +240,14 @@ def create_schema(engine: Engine, sql_dir: Path | None = None) -> None:
     """
     if is_mssql(engine):
         sql_dir = sql_dir or Path(__file__).resolve().parents[2] / "sql"
+        if not (sql_dir / "001_schema.sql").exists():
+            # parents[2] is the repository root under `pip install -e .`; a
+            # non-editable install leaves the .sql files outside the package.
+            raise FileNotFoundError(
+                f"could not find 001_schema.sql under {sql_dir}. Install the "
+                f"project in editable mode (pip install -e .) or apply "
+                f"sql/001_schema.sql and sql/002_views.sql with sqlcmd."
+            )
         apply_sql_script(engine, sql_dir / "001_schema.sql")
         apply_sql_script(engine, sql_dir / "002_views.sql")
         return

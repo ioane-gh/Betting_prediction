@@ -304,3 +304,43 @@ def test_written_template_loads_as_empty(engine, tmp_path):
     assert report.rows_loaded == 0
     assert report.errors == []
     assert not report.missing_file
+
+
+# -- Windows connection strings --------------------------------------------
+def _odbc(db: DbConfig) -> str:
+    import urllib.parse
+    return urllib.parse.unquote_plus(db.sqlalchemy_url().split("odbc_connect=")[1])
+
+
+def test_plain_host_gets_a_port():
+    assert DbConfig(host="localhost", port=1433).server == "localhost,1433"
+    assert "SERVER=localhost,1433" in _odbc(DbConfig(host="localhost", port=1433))
+
+
+@pytest.mark.parametrize("host", [r".\SQLEXPRESS", r"localhost\SQLEXPRESS",
+                                  r"(localdb)\MSSQLLocalDB"])
+def test_named_instances_never_get_a_port(host):
+    """A named instance and LocalDB resolve through the SQL Browser service by
+    instance name. Appending ,1433 stops the connection working at all, which
+    is how most Windows installs are reached."""
+    db = DbConfig(host=host, port=1433, trusted_connection=True)
+    assert db.server == host
+    assert f"SERVER={host};" in _odbc(db)
+    assert ",1433" not in _odbc(db)
+
+
+def test_zero_port_is_omitted():
+    assert DbConfig(host="dbhost", port=0).server == "dbhost"
+
+
+def test_trusted_connection_sends_no_credentials():
+    odbc = _odbc(DbConfig(host=r".\SQLEXPRESS", trusted_connection=True,
+                          user="ignored", password="ignored"))
+    assert "Trusted_Connection=yes" in odbc
+    assert "UID=" not in odbc and "PWD=" not in odbc
+
+
+def test_redacted_url_covers_trusted_connections():
+    shown = DbConfig(host=r"(localdb)\MSSQLLocalDB", trusted_connection=True).redacted_url()
+    assert "(trusted)" in shown
+    assert "PWD" not in shown

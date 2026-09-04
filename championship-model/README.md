@@ -52,12 +52,14 @@ and `fbref.com` (all three return `connect_rejected` from the proxy). So:
 
 **First thing to do on a machine with network access:**
 
-```bash
+```powershell
 champmodel init-db
 champmodel ingest --backfill          # ~5,500 matches, 10 seasons
 champmodel backtest --seasons 3       # the real acceptance test
 champmodel tune --seasons 2           # then adopt the winning values in .env
 ```
+
+(Setting up from scratch on Windows? Start at **Install** below and come back.)
 
 Phase 7's acceptance bar — log loss within ~0.01 of the de-vigged closing line,
 no calibration bucket off by more than a few points — must be met **on that
@@ -65,34 +67,237 @@ run** before any output is worth reading.
 
 ---
 
-## Install
+## Install (Windows / PowerShell)
 
-```bash
-python -m venv .venv && source .venv/bin/activate
-pip install -e ".[dev]"          # add ",mssql" for pyodbc, ",fbref" for xG
-cp .env.example .env             # then edit
+Everything below is PowerShell on Windows. macOS and Linux equivalents are at
+the end of this section.
+
+You need **Python 3.10+** and, for the real database, **SQL Server 2019+** with
+the **ODBC Driver 18**. Check what you have:
+
+```powershell
+python --version
+# if that opens the Microsoft Store instead, use the launcher:
+py -3 --version
+
+# is an ODBC driver installed?
+Get-OdbcDriver -Name "*SQL Server*" | Select-Object -ExpandProperty Name
 ```
 
-`champmodel` is also runnable as `python -m champmodel.cli`.
+If no ODBC driver is listed, install one (needed only for SQL Server — the
+tests run without it):
 
-### Database
+```powershell
+winget install --id Microsoft.msodbcsql.18
+```
 
-SQL Server 2019+ is the target. Apply the schema either way:
+### Set the project up
 
-```bash
-champmodel init-db                              # via SQLAlchemy
-# or
-sqlcmd -S host -d champ -i sql/001_schema.sql -i sql/002_views.sql
+```powershell
+cd championship-model
+
+py -3 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+
+python -m pip install --upgrade pip
+pip install -e ".[dev,mssql]"        # add ,fbref for optional xG
+
+Copy-Item .env.example .env
+notepad .env                          # edit, see below
+```
+
+If activation fails with *"running scripts is disabled on this system"*, allow
+signed local scripts for your user once — this does not need an admin prompt:
+
+```powershell
+Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
+```
+
+Then `.\.venv\Scripts\Activate.ps1` again. Your prompt should read `(.venv)`.
+
+Check the install:
+
+```powershell
+champmodel --help
+pytest -q                             # 202 tests, ~19s, no database needed
+```
+
+`champmodel` is also runnable as `python -m champmodel.cli`, which is useful if
+the `Scripts` directory is not on `PATH`.
+
+### Configure `.env`
+
+Set these for a local SQL Server using your Windows login:
+
+```ini
+CHAMP_DB_HOST=.\SQLEXPRESS
+CHAMP_DB_NAME=champ
+CHAMP_DB_TRUSTED_CONNECTION=1
+CHAMP_DB_USER=
+CHAMP_DB_PASSWORD=
+CHAMP_DB_DRIVER=ODBC Driver 18 for SQL Server
+FOOTBALL_DATA_ORG_KEY=your-free-key-here
+```
+
+`CHAMP_DB_HOST` takes whatever you would type into SSMS:
+
+| your setup | `CHAMP_DB_HOST` |
+|---|---|
+| SQL Server Express | `.\SQLEXPRESS` or `localhost\SQLEXPRESS` |
+| LocalDB (ships with SSMS / Visual Studio) | `(localdb)\MSSQLLocalDB` |
+| Default instance on this machine | `localhost` |
+| A server elsewhere | `dbhost.example.com` (add `CHAMP_DB_PORT` if not 1433) |
+
+A named instance and LocalDB are resolved by instance name rather than by port,
+so the port is left out of the connection string automatically — don't add one.
+
+`.env` is gitignored. It holds your database password when you use SQL
+authentication, so keep it that way.
+
+Get the free football-data.org key at
+<https://www.football-data.org/client/register> — it arrives by email in a
+minute or two. The historical backfill does not need it; only today's fixtures
+do.
+
+### No SQL Server? Run on SQLite
+
+The whole pipeline works on SQLite, which is how the tests run. Put this in
+`.env` **instead of** the `CHAMP_DB_*` lines above and skip the ODBC install:
+
+```ini
+CHAMP_DB_URL=sqlite:///./data/champ.db
+```
+
+Everything below works identically. Move to SQL Server later by swapping the
+`.env` lines and re-running `champmodel init-db` and the backfill.
+
+You will see **two** files appear, `champ.db` and `champ.champ.db`. That is
+expected, not a bug: SQL Server puts everything in a `champ` schema, and SQLite
+reaches a schema through `ATTACH DATABASE`, which is a second file. Keeping the
+two backends on one set of table definitions is what lets the test suite run
+without SQL Server. Back up or delete both together.
+
+### Create the schema
+
+On SQL Server, create the **database** first — `init-db` connects to it, so it
+has to exist before the schema can go in. Once, from SSMS or from PowerShell:
+
+```powershell
+sqlcmd -S ".\SQLEXPRESS" -E -Q "IF DB_ID('champ') IS NULL CREATE DATABASE champ"
+```
+
+(`-E` is Windows authentication; use `-U sa -P yourpassword` for SQL auth.)
+On SQLite there is nothing to do — the file is created for you.
+
+Then:
+
+```powershell
+champmodel init-db
+```
+
+That creates the `champ` schema, its tables, indexes and views, and seeds the
+team registry. It is safe to re-run. If you would rather apply the DDL by hand:
+
+```powershell
+sqlcmd -S ".\SQLEXPRESS" -E -d champ -i sql\001_schema.sql
+sqlcmd -S ".\SQLEXPRESS" -E -d champ -i sql\002_views.sql
 ```
 
 `sql/001_schema.sql` is the authoritative DDL; the SQLAlchemy Core metadata in
 `champmodel/db.py` mirrors it, and `tests/test_schema_parity.py` fails if the
 two ever drift apart. The test suite runs against SQLite (with a `champ` schema
 attached), so no SQL Server instance is needed to develop. Point
-`CHAMP_TEST_DB_URL` at a real instance to exercise the `MERGE` path.
+`CHAMP_TEST_DB_URL` at a real instance to exercise the `MERGE` path:
+
+```powershell
+$env:CHAMP_TEST_DB_URL = "mssql+pyodbc://@.\SQLEXPRESS/champ_test?driver=ODBC+Driver+18+for+SQL+Server&trusted_connection=yes"
+pytest -q
+Remove-Item Env:\CHAMP_TEST_DB_URL
+```
 
 Every load is an idempotent upsert on a natural key. Re-running a day's ingest
 updates rows; it never duplicates them.
+
+### First real run
+
+In order, once:
+
+```powershell
+champmodel ingest --backfill          # ~5,500 matches, 10 seasons. Minutes.
+champmodel backtest --seasons 3       # the acceptance test. See Phase 7 below.
+champmodel tune --seasons 2           # optional: then adopt the winners in .env
+champmodel fit                        # store the fitted model
+```
+
+Then, each day you want numbers:
+
+```powershell
+notepad data\availability.csv         # today's team news, if you have it
+champmodel ingest --today
+champmodel predict --date today
+```
+
+`predict` prints the table, writes `output\YYYY-MM-DD.csv`, and stores the run
+in `champ.model_run` / `champ.prediction`.
+
+**Do not skip the backtest.** Until it has run on real data, the model is
+untuned and uncalibrated, and `predict` will flag every row `uncalibrated`.
+
+### Running it daily without typing anything
+
+Register a Scheduled Task that runs at 09:00 each day. Adjust the paths:
+
+```powershell
+$project = "C:\path\to\championship-model"
+$action = New-ScheduledTaskAction `
+    -Execute "$project\.venv\Scripts\python.exe" `
+    -Argument "-m champmodel.cli predict --date today" `
+    -WorkingDirectory $project
+$trigger = New-ScheduledTaskTrigger -Daily -At 9:00am
+Register-ScheduledTask -TaskName "champmodel daily" -Action $action -Trigger $trigger
+```
+
+The working directory matters: `.env` is read from wherever the command runs.
+
+Check on it, or remove it:
+
+```powershell
+Get-ScheduledTaskInfo -TaskName "champmodel daily"
+Get-Content .\logs\champmodel-*.jsonl -Tail 20
+Unregister-ScheduledTask -TaskName "champmodel daily" -Confirm:$false
+```
+
+A scheduled run cannot know tonight's team news, so its rows will carry
+`stale_team_news`. That is the point of the flag — treat those numbers as the
+pre-team-news product, and re-run `predict` by hand once you have line-ups.
+
+### Troubleshooting
+
+| symptom | cause and fix |
+|---|---|
+| `running scripts is disabled on this system` | `Set-ExecutionPolicy RemoteSigned -Scope CurrentUser`, then activate again |
+| `Can't open lib 'ODBC Driver 18 for SQL Server'` | driver not installed: `winget install --id Microsoft.msodbcsql.18`, or set `CHAMP_DB_DRIVER` to a name from `Get-OdbcDriver` |
+| `SSL Provider: certificate chain was issued by an authority that is not trusted` | a local instance with a self-signed certificate: keep `CHAMP_DB_TRUST_CERT=yes` |
+| `Login failed for user ''` | `CHAMP_DB_TRUSTED_CONNECTION=1` for your Windows login, or set `CHAMP_DB_USER` / `CHAMP_DB_PASSWORD` for SQL auth |
+| `server was not found or was not accessible` | wrong `CHAMP_DB_HOST`, or the SQL Browser service is stopped: `Get-Service MSSQL*, SQLBrowser` |
+| `Cannot open database "champ" requested by the login` | create the database first, see **Create the schema** |
+| `could not find 001_schema.sql` | installed non-editable; re-run `pip install -e ".[dev,mssql]"` or apply the DDL with `sqlcmd` |
+| `python` opens the Microsoft Store | use `py -3` instead, or turn off the App Execution Alias in Settings |
+| `champmodel : command not found` | virtualenv not activated, or use `python -m champmodel.cli` |
+| ingest exits with code 2 | a team name did not resolve — the message names it. Add it to `ALIASES` in `champmodel/ingest/teams.py`. This is deliberate; see below |
+| every row flagged `uncalibrated` | run `champmodel backtest` once to produce the calibration artifact |
+
+### macOS and Linux
+
+```bash
+python3 -m venv .venv && source .venv/bin/activate
+pip install -e ".[dev]"          # add ",mssql" for pyodbc, ",fbref" for xG
+cp .env.example .env
+champmodel init-db
+```
+
+Commands are otherwise identical. Set environment variables with
+`export VAR=value` rather than `$env:VAR = "value"`.
 
 ---
 
@@ -305,7 +510,7 @@ directly comparable; the table above is.
 
 ## Daily run (Phase 8)
 
-```bash
+```powershell
 champmodel predict --date today
 ```
 
@@ -356,6 +561,13 @@ which it is. The flags are:
 `--synthetic` on `backtest` and `tune` runs against generated data with a loud
 warning, for checking the machinery without a database.
 
+The commands are the same in PowerShell, cmd and bash. Only the setup steps
+differ, and `--help` works on every one:
+
+```powershell
+champmodel predict --help
+```
+
 ---
 
 ## Configuration
@@ -377,8 +589,8 @@ All of `.env` is documented in `.env.example`. The ones that matter:
 
 ## Tests
 
-```bash
-pytest -q          # 195 tests, ~12s
+```powershell
+pytest -q          # 202 tests, ~19s. No database or network needed.
 ```
 
 | file | what it guards |
