@@ -423,5 +423,10 @@ def fit_dixon_coles(
                "converged": fit.converged},
     )
     if not fit.converged:
-        log.warning("optimiser did not converge", extra={"message": fit.message})
+        # "message" collides with a LogRecord attribute the stdlib logger sets
+        # itself during formatting -- passing it through `extra` raises
+        # KeyError from inside logging.Logger.makeRecord, turning a warning
+        # about a bad fit into a crash instead. Every other extra={} call in
+        # this codebase was audited for the same trap; this was the only hit.
+        log.warning("optimiser did not converge", extra={"optimizer_message": fit.message})
     return fit

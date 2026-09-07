@@ -196,6 +196,24 @@ def test_too_little_data_raises(league):
                         ModelParams())
 
 
+def test_non_convergence_logs_cleanly_instead_of_crashing(league, caplog):
+    """A real run hit this: fit_dixon_coles passed extra={"message": ...} to
+    log.warning(), and "message" is a LogRecord attribute the stdlib logger
+    sets during formatting -- passing it through extra raises KeyError from
+    inside logging itself, turning a warning about a bad fit into a crash on
+    the next grid point of a tune run. max_iter=1 reliably forces
+    scipy to report non-convergence, driving the real code path through the
+    real stdlib logger (not a mock), which is what caplog exercises here."""
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger="champmodel.model.dixon_coles"):
+        fit = fit_dixon_coles(league.matches, league.matches["match_date"].max(),
+                              ModelParams(), max_iter=1)
+
+    assert not fit.converged
+    assert any("did not converge" in r.message for r in caplog.records)
+
+
 def test_predictions_are_probabilities(fit, league):
     probs = fit.predict(league.teams[0], league.teams[1])
     for value in (probs.p_btts, probs.p_over25, probs.p_home, probs.p_draw, probs.p_away):
