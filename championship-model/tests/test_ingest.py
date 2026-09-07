@@ -16,8 +16,9 @@ from champmodel.ingest import availability as availability_mod
 from champmodel.ingest.fbref import derive_suspension_risk
 from champmodel.ingest.footballdata_org import (RateLimiter, FootballDataOrgClient,
                                                 parse_matches)
-from champmodel.ingest.footballdata_uk import (IngestReport, SourceUnavailable,
-                                               _coalesce, download_season,
+from champmodel.ingest.footballdata_uk import (IngestReport, SeasonFileUnusable,
+                                               SourceUnavailable, _coalesce,
+                                               backfill, download_season,
                                                load_season, parse_dates,
                                                read_season_csv)
 from champmodel.ingest.seasons import (recent_start_years, season_code, season_id,
@@ -105,7 +106,8 @@ def test_download_falls_back_to_a_stale_cache(tmp_path, monkeypatch):
         def get(*_args, **_kwargs):
             raise requests.ConnectionError("egress policy denied CONNECT")
 
-    path = download_season(2025, tmp_path, max_age_days=7, session=Boom())
+    path = download_season(2025, tmp_path, max_age_days=7, session=Boom(),
+                           sleeper=lambda _s: None)
     assert path == cached
 
 
@@ -116,7 +118,8 @@ def test_download_raises_when_there_is_no_cache(tmp_path):
             raise requests.ConnectionError("no route to host")
 
     with pytest.raises(SourceUnavailable):
-        download_season(2025, tmp_path, session=Boom())
+        download_season(2025, tmp_path, session=Boom(),
+                        sleeper=lambda _s: None)
 
 
 # -- football-data.org -----------------------------------------------------
@@ -455,7 +458,7 @@ def test_backfill_records_a_missing_season_and_keeps_going(engine, tmp_path):
 
     with engine.begin() as conn:
         report = backfill(conn, TeamRegistry.sync(conn), [2025, 2026], tmp_path,
-                          max_age_days=-1)
+                          max_age_days=-1, request_delay=0)
 
     assert report.seasons_loaded == [2025]
     assert 2026 in report.seasons_failed
@@ -473,4 +476,123 @@ def test_backfill_still_hard_fails_on_an_unmapped_team(engine, tmp_path):
 
     with engine.begin() as conn:
         with pytest.raises(UnknownTeamError):
-            backfill(conn, TeamRegistry.sync(conn), [2025], tmp_path, max_age_days=-1)
+            backfill(conn, TeamRegistry.sync(conn), [2025], tmp_path, max_age_days=-1,
+                    request_delay=0)
+
+
+# -- transient 503s are retried, not fatal -----------------------------------
+class _ScriptedResponses:
+    """A fake requests session that returns a scripted sequence of responses,
+    one per call, then repeats the last one."""
+
+    def __init__(self, script):
+        self.script = script
+        self.calls = 0
+
+    def get(self, *_args, **_kwargs):
+        response = self.script[min(self.calls, len(self.script) - 1)]
+        self.calls += 1
+        return response
+
+
+class _FakeResponse:
+    def __init__(self, status_code, content=b"", headers=None):
+        self.status_code = status_code
+        self.content = content
+        self.headers = headers or {}
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise requests.HTTPError(f"{self.status_code} error")
+
+
+def test_a_transient_503_is_retried_and_then_succeeds(tmp_path):
+    """Exactly what the real ingest hit: a burst of season requests drew a
+    handful of 503s. The retry has to recover without the caller re-running
+    anything."""
+    good_body = FIXTURE.read_bytes()
+    script = [
+        _FakeResponse(503, headers={"Retry-After": "0"}),
+        _FakeResponse(503, headers={"Retry-After": "0"}),
+        _FakeResponse(200, content=good_body),
+    ]
+    session = _ScriptedResponses(script)
+
+    path = download_season(2025, tmp_path, session=session,
+                           sleeper=lambda _seconds: None)
+    assert path.read_bytes() == good_body
+    assert session.calls == 3
+
+
+def test_persistent_503_falls_back_to_a_stale_cache(tmp_path):
+    cached = tmp_path / "E1_2526.csv"
+    cached.write_bytes(FIXTURE.read_bytes())
+    import os
+    old_time = dt.datetime.now().timestamp() - 60 * 60 * 24 * 30
+    os.utime(cached, (old_time, old_time))
+
+    session = _ScriptedResponses([_FakeResponse(503)] * 5)
+    path = download_season(2025, tmp_path, session=session,
+                           sleeper=lambda _seconds: None)
+    assert path == cached
+
+
+def test_persistent_503_raises_when_there_is_no_cache_to_fall_back_to(tmp_path):
+    session = _ScriptedResponses([_FakeResponse(503)] * 5)
+    with pytest.raises(SourceUnavailable):
+        download_season(2025, tmp_path, session=session,
+                        sleeper=lambda _seconds: None)
+
+
+def test_an_unpublished_season_is_not_retried(tmp_path):
+    """SeasonFileUnusable means the response was well-formed but not a
+    results CSV -- retrying it burns time for nothing, unlike a 503."""
+    session = _ScriptedResponses([_FakeResponse(200, content=b"<html>no season yet</html>")])
+    with pytest.raises(SeasonFileUnusable):
+        download_season(2025, tmp_path, session=session,
+                        sleeper=lambda _seconds: (_ for _ in ()).throw(
+                            AssertionError("must not sleep/retry on SeasonFileUnusable")))
+    assert session.calls == 1
+
+
+def test_backfill_pauses_between_seasons_but_not_before_the_first(engine, tmp_path):
+    from champmodel.ingest.seasons import season_code
+
+    delays = []
+    for start_year in (2024, 2025, 2026):
+        (tmp_path / f"E1_{season_code(start_year)}.csv").write_bytes(FIXTURE.read_bytes())
+
+    with engine.begin() as conn:
+        backfill(conn, TeamRegistry.sync(conn), [2024, 2025, 2026], tmp_path,
+                max_age_days=-1, request_delay=2.5, sleeper=delays.append)
+
+    assert delays == [2.5, 2.5]      # one gap before season 2 and season 3, none before season 1
+
+
+def test_backfill_recovers_from_a_run_of_503s_partway_through(engine, tmp_path):
+    """Reproduces the real failure: several seasons in a row answer 503 near
+    the end of a ten-season run. backfill must retry each and finish clean."""
+    good = FIXTURE.read_bytes()
+
+    def make_session():
+        return _ScriptedResponses([_FakeResponse(503), _FakeResponse(503),
+                                   _FakeResponse(200, content=good)])
+
+    class PerCallSession:
+        """download_season is given one shared session; give each call its
+        own scripted 503-503-200 sequence to emulate the outage clearing."""
+        def __init__(self):
+            self._sessions = {}
+
+        def get(self, url, *args, **kwargs):
+            self._sessions.setdefault(url, make_session())
+            return self._sessions[url].get(url, *args, **kwargs)
+
+    with engine.begin() as conn:
+        report = backfill(conn, TeamRegistry.sync(conn), [2024, 2025, 2026], tmp_path,
+                          max_age_days=-1, session=PerCallSession(),
+                          request_delay=0, sleeper=lambda _s: None)
+
+    assert report.seasons_loaded == [2024, 2025, 2026]
+    assert report.seasons_failed == {}
+    assert report.ok

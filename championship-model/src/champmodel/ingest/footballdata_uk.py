@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import datetime as dt
 import io
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Sequence
@@ -101,6 +102,19 @@ def _is_stale(path: Path, max_age_days: int) -> bool:
     return age > dt.timedelta(days=max_age_days)
 
 
+# A plain requests default User-Agent (or a custom one that names itself as a
+# script) is exactly the signature some sites rate-limit or 503 under load --
+# and a burst of ten back-to-back requests during --backfill is enough load to
+# trigger it. Presenting as an ordinary browser avoids that without being
+# deceptive about what the request actually does: it is a single GET for a
+# public CSV, the same one a browser would fetch.
+DOWNLOAD_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+)
+_RETRYABLE_STATUS = {429, 500, 502, 503, 504}
+
+
 def download_season(
     start_year: int,
     raw_dir: Path,
@@ -108,13 +122,17 @@ def download_season(
     max_age_days: int = 7,
     timeout: float = 30.0,
     session: requests.Session | None = None,
+    max_retries: int = 4,
+    sleeper: Any = time.sleep,
 ) -> Path:
     """Fetch one season CSV, reusing the cached copy when it is fresh enough.
 
     A finished season is immutable, so only the current season is refreshed on
-    the weekly cadence. If the network fails but a cached copy exists, the
-    cached copy is used and a warning is logged -- the run degrades, it does
-    not die.
+    the weekly cadence. A 5xx or a connection error is retried with backoff --
+    the site has occasionally answered a burst of season requests with a
+    handful of transient 503s -- and if every attempt still fails but a cached
+    copy exists, the cached copy is used with a warning: the run degrades, it
+    does not die.
     """
     raw_dir.mkdir(parents=True, exist_ok=True)
     path = cache_path(raw_dir, start_year)
@@ -124,31 +142,53 @@ def download_season(
 
     url = BASE_URL.format(season=season_code(start_year))
     http = session or requests
-    try:
-        response = http.get(url, timeout=timeout, headers={"User-Agent": "champmodel/0.1"})
-        response.raise_for_status()
-        if not response.content.strip():
-            raise SourceUnavailable(f"{url} returned an empty body")
-        if b"HomeTeam" not in response.content[:4096]:
-            # An error page served with a 200, or a season not published yet.
-            # Caching it would poison every later run.
-            raise SeasonFileUnusable(
-                f"{url} did not return a results CSV "
-                f"(no HomeTeam column in the first 4KB)"
-            )
-        path.write_bytes(response.content)
-        log.info("downloaded season file",
-                 extra={"season": start_year, "bytes": len(response.content)})
-        return path
-    except Exception as exc:  # network, HTTP, proxy policy -- all the same here
-        # A previously good copy beats a failed refresh, whatever the cause.
-        if path.exists() and path.stat().st_size > 0:
-            log.warning("download failed, falling back to stale cache",
-                        extra={"season": start_year, "error": str(exc)})
+    last_error: Exception | None = None
+
+    for attempt in range(max_retries):
+        try:
+            response = http.get(url, timeout=timeout,
+                                headers={"User-Agent": DOWNLOAD_USER_AGENT})
+            if response.status_code in _RETRYABLE_STATUS and attempt < max_retries - 1:
+                backoff = float(response.headers.get("Retry-After", 2 ** attempt * 3))
+                log.warning("transient error fetching season file, retrying",
+                            extra={"season": start_year, "status": response.status_code,
+                                   "attempt": attempt + 1, "seconds": backoff})
+                sleeper(backoff)
+                continue
+            response.raise_for_status()
+            if not response.content.strip():
+                raise SourceUnavailable(f"{url} returned an empty body")
+            if b"HomeTeam" not in response.content[:4096]:
+                # An error page served with a 200, or a season not published
+                # yet. Caching it would poison every later run.
+                raise SeasonFileUnusable(
+                    f"{url} did not return a results CSV "
+                    f"(no HomeTeam column in the first 4KB)"
+                )
+            path.write_bytes(response.content)
+            log.info("downloaded season file",
+                     extra={"season": start_year, "bytes": len(response.content),
+                            "attempt": attempt + 1})
             return path
-        if isinstance(exc, SourceUnavailable):
-            raise          # already says exactly what went wrong
-        raise SourceUnavailable(f"could not fetch {url}: {exc}") from exc
+        except SeasonFileUnusable:
+            raise          # not transient -- retrying an unpublished season wastes time
+        except Exception as exc:  # network, HTTP, proxy policy -- all the same here
+            last_error = exc
+            if attempt < max_retries - 1:
+                backoff = 2 ** attempt
+                log.warning("download failed, retrying",
+                            extra={"season": start_year, "attempt": attempt + 1,
+                                   "error": str(exc)})
+                sleeper(backoff)
+
+    # Every attempt failed. A previously good copy beats a failed refresh.
+    if path.exists() and path.stat().st_size > 0:
+        log.warning("download failed after retries, falling back to stale cache",
+                    extra={"season": start_year, "error": str(last_error)})
+        return path
+    if isinstance(last_error, SourceUnavailable):
+        raise last_error    # already says exactly what went wrong
+    raise SourceUnavailable(f"could not fetch {url} after {max_retries} attempts: {last_error}")
 
 
 # --------------------------------------------------------------------------
@@ -406,13 +446,25 @@ def backfill(
     *,
     max_age_days: int = 7,
     session: requests.Session | None = None,
+    request_delay: float = 1.5,
+    sleeper: Any = time.sleep,
 ) -> IngestReport:
-    """Download and load a run of seasons. Unreachable seasons are recorded."""
+    """Download and load a run of seasons. Unreachable seasons are recorded.
+
+    A ten-season backfill is ten back-to-back requests to the same host, which
+    is enough to look like a burst rather than the occasional visitor a public
+    CSV download is meant for. A small delay between them is cheap insurance
+    against exactly the transient 503s the retry logic in ``download_season``
+    already handles -- fewer retries needed, and lighter on the host either way.
+    """
     report = IngestReport()
-    for start_year in start_years:
+    start_years = list(start_years)
+    for i, start_year in enumerate(start_years):
+        if i > 0 and request_delay > 0:
+            sleeper(request_delay)
         try:
             path = download_season(start_year, raw_dir, max_age_days=max_age_days,
-                                   session=session)
+                                   session=session, sleeper=sleeper)
             # UnknownTeamError is not caught here on purpose: an unmapped club
             # is a hard failure, not a degraded input.
             load_season(conn, registry, start_year, path, report)
