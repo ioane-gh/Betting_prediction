@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import datetime as dt
 import io
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -126,6 +127,50 @@ _RETRYABLE_STATUS = {429, 500, 502, 503, 504}
 DEFAULT_TIMEOUT: tuple[float, float] = (5.0, 15.0)
 
 
+def _bounded_get(http: Any, url: str, *, timeout: Any, headers: dict[str, str],
+                 hard_timeout: float) -> Any:
+    """A GET that cannot outlive ``hard_timeout``, whatever the network does.
+
+    ``timeout=`` is a promise requests makes to *itself* -- it has no power
+    over a VPN, a corporate proxy, or a broken IPv6 route that silently
+    swallows the connection instead of refusing it, and on exactly that kind
+    of network a "20 second" request can measure in minutes.
+
+    This runs the call on a ``daemon=True`` thread and stops waiting after
+    ``hard_timeout`` regardless of whether that thread ever finishes. Daemon
+    is not decoration here: ``concurrent.futures.ThreadPoolExecutor`` was
+    tried first and rejected, because its worker threads are joined by an
+    atexit hook in the ``concurrent.futures.thread`` module no matter what
+    ``shutdown(wait=False)`` is told -- a genuinely stuck call would still
+    block the whole process at interpreter exit, which is precisely the hang
+    this function exists to prevent. A plain daemon thread has no such hook:
+    the process can exit with it still blocked inside a socket call, and it
+    is torn down with the interpreter rather than waited on.
+    """
+    box: dict[str, Any] = {}
+
+    def run() -> None:
+        try:
+            box["result"] = http.get(url, timeout=timeout, headers=headers)
+        except BaseException as exc:  # noqa: BLE001 -- forwarded to the caller's thread
+            box["error"] = exc
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    thread.join(hard_timeout)
+
+    if thread.is_alive():
+        # Still running -- abandoned, not cancelled (Python cannot interrupt
+        # a blocked C-level socket call). It will die with the process.
+        raise SourceUnavailable(
+            f"{url} did not respond within {hard_timeout:.0f}s "
+            f"(hard limit -- the network did not honour the request timeout)"
+        )
+    if "error" in box:
+        raise box["error"]
+    return box["result"]
+
+
 def download_season(
     start_year: int,
     raw_dir: Path,
@@ -135,6 +180,7 @@ def download_season(
     session: requests.Session | None = None,
     max_retries: int = 4,
     sleeper: Any = time.sleep,
+    hard_timeout: float | None = None,
 ) -> Path:
     """Fetch one season CSV, reusing the cached copy when it is fresh enough.
 
@@ -144,6 +190,15 @@ def download_season(
     handful of transient 503s -- and if every attempt still fails but a cached
     copy exists, the cached copy is used with a warning: the run degrades, it
     does not die.
+
+    Every attempt also runs under ``hard_timeout`` (default: the configured
+    connect+read budget plus 10s), enforced by ``_bounded_get`` from outside
+    the request entirely. ``timeout=`` only binds requests' own idea of how
+    long to wait; a VPN, proxy, or broken route that silently drops the
+    connection instead of refusing it can make requests wait far longer than
+    that regardless -- one real run measured single attempts in minutes
+    against a five-second connect timeout. ``hard_timeout`` is the ceiling
+    nothing on the network can push past.
     """
     raw_dir.mkdir(parents=True, exist_ok=True)
     path = cache_path(raw_dir, start_year)
@@ -154,11 +209,17 @@ def download_season(
     url = BASE_URL.format(season=season_code(start_year))
     http = session or requests
     last_error: Exception | None = None
+    # A 10s cushion over the connect+read budget: enough slack that a request
+    # requests itself would time out normally still gets to, but no more.
+    budget = hard_timeout if hard_timeout is not None else (
+        sum(timeout) + 10.0 if isinstance(timeout, tuple) else float(timeout) + 10.0
+    )
 
     for attempt in range(max_retries):
         try:
-            response = http.get(url, timeout=timeout,
-                                headers={"User-Agent": DOWNLOAD_USER_AGENT})
+            response = _bounded_get(http, url, timeout=timeout,
+                                    headers={"User-Agent": DOWNLOAD_USER_AGENT},
+                                    hard_timeout=budget)
             if response.status_code in _RETRYABLE_STATUS and attempt < max_retries - 1:
                 backoff = float(response.headers.get("Retry-After", 2 ** attempt * 3))
                 log.warning("transient error fetching season file, retrying",
@@ -459,6 +520,7 @@ def backfill(
     session: requests.Session | None = None,
     request_delay: float = 1.5,
     sleeper: Any = time.sleep,
+    hard_timeout: float | None = None,
 ) -> IngestReport:
     """Download and load a run of seasons. Unreachable seasons are recorded.
 
@@ -467,6 +529,10 @@ def backfill(
     CSV download is meant for. A small delay between them is cheap insurance
     against exactly the transient 503s the retry logic in ``download_season``
     already handles -- fewer retries needed, and lighter on the host either way.
+
+    ``hard_timeout`` passes straight through to every ``download_season``
+    call; see its docstring for why that ceiling exists on top of the
+    ordinary request timeout.
     """
     report = IngestReport()
     start_years = list(start_years)
@@ -475,7 +541,8 @@ def backfill(
             sleeper(request_delay)
         try:
             path = download_season(start_year, raw_dir, max_age_days=max_age_days,
-                                   session=session, sleeper=sleeper)
+                                   session=session, sleeper=sleeper,
+                                   hard_timeout=hard_timeout)
             # UnknownTeamError is not caught here on purpose: an unmapped club
             # is a hard failure, not a degraded input.
             load_season(conn, registry, start_year, path, report)

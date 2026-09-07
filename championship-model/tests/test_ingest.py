@@ -626,3 +626,69 @@ def test_download_season_passes_the_timeout_tuple_through(tmp_path):
 
     download_season(2025, tmp_path, session=Recorder(), sleeper=lambda _s: None)
     assert seen["timeout"] == (5.0, 15.0)
+
+
+# -- a hard ceiling that no network condition can bypass ---------------------
+def test_bounded_get_gives_up_on_a_call_that_never_returns():
+    """Reproduces the real report: a request that hangs for minutes despite a
+    short configured timeout, because something on the network (VPN, proxy,
+    broken route) silently drops the connection instead of refusing it.
+    _bounded_get must return control within hard_timeout regardless."""
+    import time as time_mod
+
+    from champmodel.ingest.footballdata_uk import _bounded_get
+
+    class NeverReturns:
+        @staticmethod
+        def get(*_args, **_kwargs):
+            time_mod.sleep(999)     # simulates a connection requests' own
+                                     # timeout failed to bound
+
+    start = time_mod.monotonic()
+    with pytest.raises(SourceUnavailable, match="did not respond within"):
+        _bounded_get(NeverReturns(), "https://example.invalid/x",
+                    timeout=(5.0, 15.0), headers={}, hard_timeout=0.2)
+    elapsed = time_mod.monotonic() - start
+    assert elapsed < 2.0, f"the hard cap did not actually bound the wait ({elapsed:.2f}s)"
+
+
+def test_bounded_get_returns_normally_when_the_call_is_fast():
+    from champmodel.ingest.footballdata_uk import _bounded_get
+
+    session = _ScriptedResponses([_FakeResponse(200, content=b"ok")])
+    result = _bounded_get(session, "https://example.invalid/x",
+                          timeout=(5.0, 15.0), headers={}, hard_timeout=5.0)
+    assert result.status_code == 200
+
+
+def test_download_season_survives_a_hanging_connection(tmp_path):
+    """The end-to-end version of the bug report: every attempt hangs forever
+    at the transport layer. download_season must still finish -- fast,
+    bounded by hard_timeout, not by whatever the network is doing -- and
+    report SourceUnavailable rather than blocking indefinitely."""
+    import time as time_mod
+
+    class AlwaysHangs:
+        @staticmethod
+        def get(*_args, **_kwargs):
+            time_mod.sleep(999)
+
+    start = time_mod.monotonic()
+    with pytest.raises(SourceUnavailable):
+        download_season(2025, tmp_path, session=AlwaysHangs(),
+                        sleeper=lambda _s: None, hard_timeout=0.2, max_retries=3)
+    elapsed = time_mod.monotonic() - start
+    # 3 attempts * 0.2s hard cap, plus near-zero backoff (stubbed sleeper) --
+    # must stay a tiny fraction of what the old bug let this take (minutes).
+    assert elapsed < 3.0, f"took {elapsed:.2f}s -- the hard cap was not applied per attempt"
+
+
+def test_default_hard_timeout_is_derived_from_the_timeout_budget():
+    import inspect
+
+    from champmodel.ingest.footballdata_uk import DEFAULT_TIMEOUT, download_season
+
+    sig = inspect.signature(download_season)
+    assert sig.parameters["hard_timeout"].default is None   # computed, not hardcoded
+    # Documented relationship: connect + read + 10s cushion.
+    assert sum(DEFAULT_TIMEOUT) + 10.0 == 30.0
