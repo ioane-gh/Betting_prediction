@@ -170,6 +170,13 @@ class Config:
     fbref_crawl_delay: float = 3.0
     refit_after_days: int = 7
     log_level: str = "INFO"
+    # A misconfigured or malfunctioning system/VPN proxy is a common way for
+    # outbound HTTPS to hang or silently fail on a managed or VPN-connected
+    # Windows machine, in a way no client-side timeout can fix -- the browser
+    # and requests can disagree about which proxy to use, or the proxy itself
+    # can accept a connection and never answer it. True routes requests around
+    # whatever proxy the OS reports (env vars, and on Windows the registry).
+    ignore_system_proxy: bool = False
     # Which .env was read, if any. None means the settings below are pure
     # defaults, which point at a local SQL Server that may not exist -- worth
     # saying out loud rather than failing obscurely later.
@@ -202,6 +209,7 @@ class Config:
             fbref_crawl_delay=_env_float("CHAMP_FBREF_CRAWL_DELAY", 3.0),
             refit_after_days=_env_int("CHAMP_REFIT_AFTER_DAYS", 7),
             log_level=_env("CHAMP_LOG_LEVEL", "INFO"),
+            ignore_system_proxy=_env_bool("CHAMP_IGNORE_SYSTEM_PROXY", False),
             env_file=used,
         )
 

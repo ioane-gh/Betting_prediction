@@ -692,3 +692,76 @@ def test_default_hard_timeout_is_derived_from_the_timeout_budget():
     assert sig.parameters["hard_timeout"].default is None   # computed, not hardcoded
     # Documented relationship: connect + read + 10s cushion.
     assert sum(DEFAULT_TIMEOUT) + 10.0 == 30.0
+
+
+# -- a broken system/VPN proxy is a distinct, diagnosable failure mode -------
+def test_make_session_defaults_to_trusting_the_environment():
+    from champmodel.ingest.footballdata_uk import make_session
+
+    session = make_session(ignore_system_proxy=False)
+    assert session.trust_env is True
+
+
+def test_make_session_can_route_around_a_broken_proxy():
+    from champmodel.ingest.footballdata_uk import make_session
+
+    session = make_session(ignore_system_proxy=True)
+    assert session.trust_env is False
+    assert session.proxies == {}
+
+
+def test_active_proxies_never_raises(monkeypatch):
+    """Diagnostic logging must not be able to break a download on its own."""
+    import urllib.request
+
+    from champmodel.ingest.footballdata_uk import active_proxies
+
+    def boom():
+        raise OSError("registry access denied")
+
+    monkeypatch.setattr(urllib.request, "getproxies", boom)
+    assert active_proxies() == {}
+
+
+def test_active_proxies_reports_what_getproxies_finds(monkeypatch):
+    import urllib.request
+
+    from champmodel.ingest.footballdata_uk import active_proxies
+
+    monkeypatch.setattr(urllib.request, "getproxies",
+                        lambda: {"https": "http://proxy.example:8080"})
+    assert active_proxies() == {"https": "http://proxy.example:8080"}
+
+
+def test_unreachable_season_logs_proxy_diagnostics(tmp_path, caplog, monkeypatch):
+    """A user should not have to run netsh by hand to learn a proxy is in
+    play -- the failure log line says so on its own."""
+    import logging
+    import urllib.request
+
+    monkeypatch.setattr(urllib.request, "getproxies",
+                        lambda: {"https": "http://proxy.example:8080"})
+
+    session = _ScriptedResponses([_FakeResponse(503)] * 5)
+    with caplog.at_level(logging.WARNING, logger="champmodel.ingest.footballdata_uk"):
+        with pytest.raises(SourceUnavailable):
+            download_season(2025, tmp_path, session=session, sleeper=lambda _s: None)
+
+    messages = [r.message for r in caplog.records]
+    assert any("unreachable" in m for m in messages)
+    proxy_records = [r for r in caplog.records if "unreachable" in r.message]
+    assert proxy_records[0].system_proxy == {"https": "http://proxy.example:8080"}
+    assert "CHAMP_IGNORE_SYSTEM_PROXY" in proxy_records[0].hint
+
+
+def test_ignore_system_proxy_config_defaults_off():
+    assert ModelParams  # smoke: config module import path already exercised
+    from champmodel.config import Config
+
+    assert Config().ignore_system_proxy is False
+
+
+def test_ignore_system_proxy_reads_the_env_var(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_text("CHAMP_IGNORE_SYSTEM_PROXY=1\n", encoding="utf-8")
+    assert Config.load().ignore_system_proxy is True

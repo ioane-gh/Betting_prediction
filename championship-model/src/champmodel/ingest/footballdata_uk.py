@@ -15,6 +15,7 @@ import datetime as dt
 import io
 import threading
 import time
+import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Sequence
@@ -125,6 +126,56 @@ _RETRYABLE_STATUS = {429, 500, 502, 503, 504}
 # either number; an unreachable one now fails fast enough that the retry
 # ladder finishes in a reasonable time instead of feeling hung.
 DEFAULT_TIMEOUT: tuple[float, float] = (5.0, 15.0)
+
+
+def active_proxies() -> dict[str, str]:
+    """Whatever proxy configuration the OS reports for outbound HTTPS.
+
+    ``urllib.request.getproxies()`` checks the standard environment variables
+    on every platform and, on Windows, also the registry-based system proxy a
+    VPN client or IT policy can set without an environment variable ever being
+    involved. requests trusts exactly this configuration by default -- a
+    misconfigured or half-dead proxy here explains a connection that hangs or
+    fails for Python while a browser (which may apply its own bypass rules)
+    works fine.
+    """
+    try:
+        return dict(urllib.request.getproxies())
+    except Exception:  # pragma: no cover -- defensive; must never block a download
+        return {}
+
+
+def make_session(ignore_system_proxy: bool = False) -> requests.Session:
+    """A session that optionally routes around whatever proxy the OS reports.
+
+    ``trust_env=False`` is what actually disables it: requests otherwise reads
+    proxy settings from the environment (and, via urllib, from Windows) on
+    every request. This is the escape hatch for exactly that failure mode --
+    off by default because plenty of networks need the proxy to reach the
+    internet at all, and turning it off there would trade one failure for a
+    worse one.
+    """
+    session = requests.Session()
+    if ignore_system_proxy:
+        session.trust_env = False
+        session.proxies = {}
+    return session
+
+
+def _log_unreachable(start_year: int, url: str, error: Exception) -> None:
+    """Every detail needed to tell 'the site is down' from 'something on this
+    network is in the way' apart, without asking the user to run anything."""
+    proxies = active_proxies()
+    log.warning(
+        "season file unreachable after all retries",
+        extra={
+            "season": start_year, "url": url, "error": str(error),
+            "system_proxy": proxies or "none detected",
+            "hint": ("a system/VPN proxy is configured -- try "
+                     "CHAMP_IGNORE_SYSTEM_PROXY=1 in .env" if proxies
+                     else "no proxy detected; likely a direct network or DNS issue"),
+        },
+    )
 
 
 def _bounded_get(http: Any, url: str, *, timeout: Any, headers: dict[str, str],
@@ -258,6 +309,7 @@ def download_season(
         log.warning("download failed after retries, falling back to stale cache",
                     extra={"season": start_year, "error": str(last_error)})
         return path
+    _log_unreachable(start_year, url, last_error or SourceUnavailable("unknown error"))
     if isinstance(last_error, SourceUnavailable):
         raise last_error    # already says exactly what went wrong
     raise SourceUnavailable(f"could not fetch {url} after {max_retries} attempts: {last_error}")

@@ -136,7 +136,7 @@ Check the install:
 
 ```powershell
 champmodel version                    # champmodel 0.1.0 (model dc-0.1.0)
-pytest -q                             # 214 tests, ~13s, no database needed
+pytest -q                             # 233 tests, ~10s, no database needed
 ```
 
 > **The `champmodel` command only exists while the virtual environment is
@@ -335,6 +335,7 @@ pre-team-news product, and re-run `predict` by hand once you have line-ups.
 | `Can't open lib 'ODBC Driver 18 for SQL Server'` | the *system* ODBC driver is missing (different from pyodbc): `winget install --id Microsoft.msodbcsql.18`, or set `CHAMP_DB_DRIVER` to a name from `Get-OdbcDriver` |
 | `No .env found and no CHAMP_DB_* set` | there is no `.env`, so the defaults point at `localhost:1433`. `Copy-Item .env.example .env` and edit it |
 | `AttributeError: module 'champmodel...' has no attribute '...'` | Python is loading a *different* `champmodel` than the one in `src/`. See below the table |
+| `ingest --backfill` retries repeatedly, or eventually gives up on every season | most likely a system/VPN proxy silently breaking the connection. See **Season downloads fail or hang** below the table |
 | `SSL Provider: certificate chain was issued by an authority that is not trusted` | a local instance with a self-signed certificate: keep `CHAMP_DB_TRUST_CERT=yes` |
 | `Login failed for user ''` | `CHAMP_DB_TRUSTED_CONNECTION=1` for your Windows login, or set `CHAMP_DB_USER` / `CHAMP_DB_PASSWORD` for SQL auth |
 | `server was not found or was not accessible` | wrong `CHAMP_DB_HOST`, or the SQL Browser service is stopped: `Get-Service MSSQL*, SQLBrowser` |
@@ -434,6 +435,56 @@ explains it, a stale bytecode cache is cheap to rule out:
 ```powershell
 Get-ChildItem -Recurse -Directory -Filter __pycache__ | Remove-Item -Recurse -Force
 ```
+
+#### Season downloads fail or hang
+
+`ingest --backfill` fetches 10 seasons back to back. Two layers of defence
+against a flaky connection are already built in: a 503 or a connection error
+is retried up to 4 times with backoff, and every attempt is bounded by a hard
+ceiling (~30s by default) that fires even if the network never answers at
+all — so a single bad season can no longer hang the whole command for minutes.
+
+If it's still failing after that, the pattern that matters is **how fast** it
+fails:
+
+- **Fails in a couple of seconds per season, every season** — the network
+  cannot reach the host at all right now. The retry logic can't fix that; only
+  the connection can. Confirm with a plain browser: open
+  `https://www.football-data.co.uk/mmz4281/1718/E1.csv` directly. If that
+  fails too, it's not this tool.
+- **A browser loads that URL fine, but the CLI still can't** — this is the
+  signature of a **system or VPN proxy** silently interfering: common on a
+  managed or VPN-connected Windows machine, since Python and a browser can
+  disagree about which proxy to use, or the proxy itself can accept a
+  connection and never answer it (which is exactly what a client-side timeout
+  cannot protect against). Two things to check:
+
+  ```powershell
+  netsh winhttp show proxy
+  $env:HTTP_PROXY; $env:HTTPS_PROXY
+  ```
+
+  If either shows a proxy configured, try routing around it. Add to `.env`:
+
+  ```ini
+  CHAMP_IGNORE_SYSTEM_PROXY=1
+  ```
+
+  This is off by default because some networks genuinely need the proxy to
+  reach the internet at all — turning it off there trades one failure for a
+  worse one. If it fixes the backfill, that confirms the proxy was the cause.
+
+  A failed run's log line also carries this diagnosis on its own — look for
+  `season file unreachable after all retries` in
+  `logs\champmodel-*.jsonl`; its `system_proxy` field names exactly what was
+  detected, or says `"none detected"` if nothing was.
+
+Whichever it is, historical seasons are static files that never change, so
+there is always a manual fallback: download the missing `E1_XXXX.csv` file
+in a browser and drop it straight into `data\raw\` (named e.g. `E1_2526.csv`
+for the 2025-26 season — see `season_code` in `champmodel/ingest/seasons.py`
+for the naming rule). `ingest --backfill` treats an existing file as already
+fetched and loads it without touching the network for that season at all.
 
 ### macOS and Linux
 
@@ -738,7 +789,7 @@ All of `.env` is documented in `.env.example`. The ones that matter:
 ## Tests
 
 ```powershell
-pytest -q          # 214 tests, ~13s. No database or network needed.
+pytest -q          # 233 tests, ~10s. No database or network needed.
 ```
 
 | file | what it guards |

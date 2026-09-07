@@ -140,9 +140,12 @@ def ingest_cmd(
         if backfill:
             years = recent_start_years(seasons or cfg.backfill_seasons)
             typer.echo(f"backfilling seasons {years[0]}-{years[-1]} ...")
+            if cfg.ignore_system_proxy:
+                typer.echo("  CHAMP_IGNORE_SYSTEM_PROXY=1: routing around the system/VPN proxy")
+            session = footballdata_uk.make_session(cfg.ignore_system_proxy)
             try:
                 report = footballdata_uk.backfill(conn, registry, years, cfg.raw_dir,
-                                                  max_age_days=max_age_days)
+                                                  max_age_days=max_age_days, session=session)
                 typer.echo(f"  {report.summary()}")
                 for year, reason in report.seasons_failed.items():
                     failures.append(f"season {year}: {reason}")
