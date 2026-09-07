@@ -115,12 +115,23 @@ DOWNLOAD_USER_AGENT = (
 _RETRYABLE_STATUS = {429, 500, 502, 503, 504}
 
 
+# (connect, read) rather than one number: a single float applies separately to
+# *each* phase in requests, so 30.0 alone means up to 60s can pass before a
+# single attempt fails -- times max_retries, that is minutes spent waiting on
+# a host that was never going to answer. 5s to open the connection is generous
+# for a small public file server; 15s to receive a season CSV (a few hundred
+# KB) is generous too. A slow-but-working attempt still succeeds well inside
+# either number; an unreachable one now fails fast enough that the retry
+# ladder finishes in a reasonable time instead of feeling hung.
+DEFAULT_TIMEOUT: tuple[float, float] = (5.0, 15.0)
+
+
 def download_season(
     start_year: int,
     raw_dir: Path,
     *,
     max_age_days: int = 7,
-    timeout: float = 30.0,
+    timeout: float | tuple[float, float] = DEFAULT_TIMEOUT,
     session: requests.Session | None = None,
     max_retries: int = 4,
     sleeper: Any = time.sleep,

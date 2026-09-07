@@ -596,3 +596,33 @@ def test_backfill_recovers_from_a_run_of_503s_partway_through(engine, tmp_path):
     assert report.seasons_loaded == [2024, 2025, 2026]
     assert report.seasons_failed == {}
     assert report.ok
+
+
+def test_default_timeout_bounds_a_single_stuck_attempt(tmp_path):
+    """A user reported a run 'stuck' on this exact warning for minutes. The
+    cause was a plain float timeout, which requests applies separately to
+    connect and read -- 30.0 meant up to 60s per attempt. Assert the fix
+    directly: the request actually receives the (connect, read) tuple, not a
+    lone float that doubles under the hood."""
+    from champmodel.ingest.footballdata_uk import DEFAULT_TIMEOUT
+
+    assert isinstance(DEFAULT_TIMEOUT, tuple) and len(DEFAULT_TIMEOUT) == 2
+    connect, read = DEFAULT_TIMEOUT
+    # Four attempts against a host that never answers must stay well under
+    # the ~4.35 minutes the old single-float default could reach.
+    worst_case_requests = 4 * (connect + read)
+    worst_case_backoff = 3 + 6 + 12          # the 2**attempt*3 schedule, 3 retries
+    assert worst_case_requests + worst_case_backoff < 120
+
+
+def test_download_season_passes_the_timeout_tuple_through(tmp_path):
+    seen = {}
+
+    class Recorder:
+        @staticmethod
+        def get(url, timeout=None, headers=None):
+            seen["timeout"] = timeout
+            return _FakeResponse(200, content=FIXTURE.read_bytes())
+
+    download_season(2025, tmp_path, session=Recorder(), sleeper=lambda _s: None)
+    assert seen["timeout"] == (5.0, 15.0)
