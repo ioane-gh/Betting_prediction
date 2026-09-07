@@ -256,3 +256,44 @@ def test_no_env_file_warns_before_using_the_defaults(tmp_path, monkeypatch):
     result = runner.invoke(app, ["status"])
     assert "No .env found" in result.output
     assert ".env.example" in result.output
+
+
+def test_ingest_backfill_uses_the_github_mirror_when_configured(tmp_path, monkeypatch):
+    """CHAMP_HISTORICAL_SOURCE=github-mirror end to end: ingest --backfill
+    loads from the cached mirror file, and backtest finds its odds under the
+    right book without the user having to know the book name exists."""
+    import shutil
+
+    from champmodel import db as dbm
+    from champmodel.config import DbConfig
+
+    data = tmp_path / "data"
+    (data / "raw").mkdir(parents=True)
+    shutil.copy(Path(__file__).parent / "fixtures" / "mirror_sample.csv",
+               data / "raw" / "mirror_matches.csv")
+
+    db_url = f"sqlite:///{data / 'champ.db'}"
+    monkeypatch.setenv("CHAMP_DB_URL", db_url)
+    monkeypatch.setenv("CHAMP_DATA_DIR", str(data))
+    monkeypatch.setenv("CHAMP_OUTPUT_DIR", str(tmp_path / "output"))
+    monkeypatch.setenv("CHAMP_LOG_LEVEL", "ERROR")
+    monkeypatch.setenv("CHAMP_HISTORICAL_SOURCE", "github-mirror")
+    monkeypatch.chdir(tmp_path)
+
+    engine = dbm.make_engine(DbConfig(url=db_url))
+    dbm.create_schema(engine)
+    engine.dispose()
+
+    # The fixture's matches sit in the 2025-26 season; --seasons 2 reaches back
+    # far enough to include it regardless of "today"'s real date.
+    output = _run("ingest", "--backfill", "--seasons", "2",
+                  "--max-age-days", "-1", "--no-availability").output
+    assert "github-mirror" in output
+    assert "unresolved aliases: 0" in output
+
+    engine = dbm.make_engine(DbConfig(url=db_url))
+    with engine.connect() as conn:
+        assert dbm.table_count(conn, dbm.fact_match) == 2      # E0 row excluded
+        book = conn.execute(sa.select(dbm.market_odds.c.book).limit(1)).scalar_one()
+    engine.dispose()
+    assert book == "Mirror"

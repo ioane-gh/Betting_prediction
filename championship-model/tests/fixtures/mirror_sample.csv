@@ -1,0 +1,5 @@
+Division,MatchDate,MatchTime,HomeTeam,AwayTeam,HomeElo,AwayElo,Form3Home,Form5Home,Form3Away,Form5Away,FTHome,FTAway,FTResult,HTHome,HTAway,HTResult,HomeShots,AwayShots,HomeTarget,AwayTarget,HomeFouls,AwayFouls,HomeCorners,AwayCorners,HomeYellow,AwayYellow,HomeRed,AwayRed,OddHome,OddDraw,OddAway,MaxHome,MaxDraw,MaxAway,Over25,Under25,MaxOver25,MaxUnder25,HandiSize,HandiHome,HandiAway,C_LTH,C_LTA,C_VHD,C_VAD,C_HTB,C_PHB
+E1,2025-08-09,12:30,Sheffield Weds,Nott'm Forest,1500,1550,0,0,0,0,2,1,H,1,0,H,14,9,6,3,11,13,7,4,2,3,0,0,2.10,3.40,3.50,2.15,3.45,3.60,1.88,1.92,1.90,1.95,0,0,0,,,,,,
+E1,2025-08-09,15:00,QPR,West Brom,1480,1520,0,0,0,0,0,0,D,0,0,D,8,12,2,5,14,10,3,6,1,2,0,1,2.60,3.20,2.70,2.65,3.25,2.75,2.02,1.78,2.05,1.80,0,0,0,,,,,,
+E0,2025-08-09,17:30,Arsenal,Chelsea,1900,1880,0,0,0,0,2,2,D,1,1,D,15,11,7,5,10,12,6,5,3,2,0,0,1.90,3.60,4.00,1.95,3.65,4.10,1.85,1.95,1.90,2.00,0,0,0,,,,,,
+E1,2010-08-14,15:00,Leeds,Millwall,1400,1400,0,0,0,0,1,1,D,0,0,D,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,

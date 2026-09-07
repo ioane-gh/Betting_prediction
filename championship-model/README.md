@@ -136,7 +136,7 @@ Check the install:
 
 ```powershell
 champmodel version                    # champmodel 0.1.0 (model dc-0.1.0)
-pytest -q                             # 233 tests, ~10s, no database needed
+pytest -q                             # 253 tests, ~16s, no database needed
 ```
 
 > **The `champmodel` command only exists while the virtual environment is
@@ -447,11 +447,29 @@ all — so a single bad season can no longer hang the whole command for minutes.
 If it's still failing after that, the pattern that matters is **how fast** it
 fails:
 
-- **Fails in a couple of seconds per season, every season** — the network
-  cannot reach the host at all right now. The retry logic can't fix that; only
-  the connection can. Confirm with a plain browser: open
-  `https://www.football-data.co.uk/mmz4281/1718/E1.csv` directly. If that
-  fails too, it's not this tool.
+- **Fails in a couple of seconds per season, every season, and a browser
+  can't load `https://www.football-data.co.uk/mmz4281/1718/E1.csv` either**
+  — the network cannot reach the host at all. Not flaky, not blocked by a
+  proxy: genuinely unroutable, and no retry or timeout setting can fix that,
+  because the problem isn't in this tool. **Switch source instead of fighting
+  it.** A GitHub-hosted mirror of the same football-data.co.uk data
+  (`xgabora/Club-Football-Match-Data-2000-2025`, MIT licensed) lives on
+  `raw.githubusercontent.com` — a host this project's own use of `git`
+  already proves reachable. Add to `.env`:
+
+  ```ini
+  CHAMP_HISTORICAL_SOURCE=github-mirror
+  ```
+
+  then re-run `champmodel ingest --backfill` as normal. It carries the same
+  goals, shots, corners, cards, and Over/Under 2.5 odds as the primary
+  source, current as of whenever it was last checked — the one thing it
+  does not have is BTTS-specific odds, so the BTTS backtest runs without a
+  market comparison while Over 2.5's stays fully intact. This is opt-in,
+  never automatic: an unreachable primary source is recorded as a missing
+  input, not silently swapped for a different one. Switch back to `co-uk`
+  (or just remove the line) once the primary source is reachable again — it
+  is the more complete source when it is.
 - **A browser loads that URL fine, but the CLI still can't** — this is the
   signature of a **system or VPN proxy** silently interfering: common on a
   managed or VPN-connected Windows machine, since Python and a browser can
@@ -504,7 +522,8 @@ Commands are otherwise identical. Set environment variables with
 
 | Source | Use | Auth | Notes |
 |---|---|---|---|
-| **football-data.co.uk** (`E1.csv`) | Historical results, 1993→. Goals, shots, SoT, corners, cards, **closing odds**. | none | Cached in `data/raw`; only the current season is refreshed. The odds columns are the benchmark, not decoration. |
+| **football-data.co.uk** (`E1.csv`) | Historical results, 1993→. Goals, shots, SoT, corners, cards, **closing odds** including BTTS. | none | Cached in `data/raw`; only the current season is refreshed. The primary source — use this when the network can reach it. |
+| **GitHub mirror** (`xgabora/Club-Football-Match-Data-2000-2025`) | The same fallback, opt-in, for a network that cannot reach football-data.co.uk's own host at all. | none | `CHAMP_HISTORICAL_SOURCE=github-mirror`. Same provenance, current through the day it was last checked, no BTTS odds. See **Season downloads fail or hang** below. |
 | **football-data.org** (`/v4/competitions/ELC/matches`) | Today's fixtures, kickoff times, results backfill. | free key | Rate-limited to 10 req/min in-process, responses cached to disk by date range. |
 | **FBref** via `soccerdata` | Optional: team xG, player minutes and cards. | none | Behind `CHAMP_ENABLE_FBREF`; 3-second crawl delay. The model works without it. |
 | **`data/availability.csv`** | Injuries and suspensions. | none | Hand-edited. There is no reliable free injury API — see Phase 5. |
@@ -789,7 +808,7 @@ All of `.env` is documented in `.env.example`. The ones that matter:
 ## Tests
 
 ```powershell
-pytest -q          # 233 tests, ~10s. No database or network needed.
+pytest -q          # 253 tests, ~16s. No database or network needed.
 ```
 
 | file | what it guards |

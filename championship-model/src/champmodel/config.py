@@ -177,6 +177,14 @@ class Config:
     # can accept a connection and never answer it. True routes requests around
     # whatever proxy the OS reports (env vars, and on Windows the registry).
     ignore_system_proxy: bool = False
+    # "co-uk": football-data.co.uk's own per-season files -- BTTS and 1X2 odds
+    # from several individual bookmakers plus the de-vigged "Avg" family.
+    # "github-mirror": xgabora/Club-Football-Match-Data-2000-2025 on GitHub,
+    # for a network that cannot reach football-data.co.uk's own host at all --
+    # same underlying data, current, but no BTTS odds. Never switched
+    # automatically: an unreachable primary source is recorded as a missing
+    # input, not silently swapped for a different one.
+    historical_source: str = "co-uk"
     # Which .env was read, if any. None means the settings below are pure
     # defaults, which point at a local SQL Server that may not exist -- worth
     # saying out loud rather than failing obscurely later.
@@ -210,8 +218,22 @@ class Config:
             refit_after_days=_env_int("CHAMP_REFIT_AFTER_DAYS", 7),
             log_level=_env("CHAMP_LOG_LEVEL", "INFO"),
             ignore_system_proxy=_env_bool("CHAMP_IGNORE_SYSTEM_PROXY", False),
+            historical_source=_env("CHAMP_HISTORICAL_SOURCE", "co-uk"),
             env_file=used,
         )
+
+    @property
+    def benchmark_book(self) -> str:
+        """Which ``champ.market_odds.book`` row is the closing-line benchmark.
+
+        The two historical sources store their prices under different book
+        labels -- "Avg" is football-data.co.uk's own de-vigged closing
+        average; "Mirror" is the single blended price the GitHub mirror
+        provides. Querying the wrong one silently returns no market
+        comparison at all rather than an error, so this is the one place
+        that decision is made.
+        """
+        return "Mirror" if self.historical_source == "github-mirror" else "Avg"
 
     @property
     def database_is_unconfigured(self) -> bool:

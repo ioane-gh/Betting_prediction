@@ -123,7 +123,7 @@ def ingest_cmd(
 ) -> None:
     """Load results, fixtures, availability and (optionally) xG."""
     from .ingest import availability as availability_mod
-    from .ingest import fbref, footballdata_org, footballdata_uk
+    from .ingest import fbref, footballdata_mirror, footballdata_org, footballdata_uk
     from .ingest.seasons import recent_start_years
     from .ingest.teams import TeamRegistry, UnknownTeamError
 
@@ -143,15 +143,29 @@ def ingest_cmd(
             if cfg.ignore_system_proxy:
                 typer.echo("  CHAMP_IGNORE_SYSTEM_PROXY=1: routing around the system/VPN proxy")
             session = footballdata_uk.make_session(cfg.ignore_system_proxy)
-            try:
-                report = footballdata_uk.backfill(conn, registry, years, cfg.raw_dir,
-                                                  max_age_days=max_age_days, session=session)
-                typer.echo(f"  {report.summary()}")
-                for year, reason in report.seasons_failed.items():
-                    failures.append(f"season {year}: {reason}")
-            except UnknownTeamError as exc:
-                _echo_err(f"ingest aborted: {exc}")
-                raise typer.Exit(code=2) from exc
+
+            if cfg.historical_source == "github-mirror":
+                typer.echo("  CHAMP_HISTORICAL_SOURCE=github-mirror: "
+                           "using the GitHub mirror, not football-data.co.uk directly")
+                try:
+                    mirror_report = footballdata_mirror.backfill(
+                        conn, registry, years, cfg.raw_dir, session=session)
+                    typer.echo(f"  {mirror_report.summary()}")
+                    if not mirror_report.ok:
+                        failures.append(f"github-mirror: {mirror_report.error}")
+                except UnknownTeamError as exc:
+                    _echo_err(f"ingest aborted: {exc}")
+                    raise typer.Exit(code=2) from exc
+            else:
+                try:
+                    report = footballdata_uk.backfill(conn, registry, years, cfg.raw_dir,
+                                                      max_age_days=max_age_days, session=session)
+                    typer.echo(f"  {report.summary()}")
+                    for year, reason in report.seasons_failed.items():
+                        failures.append(f"season {year}: {reason}")
+                except UnknownTeamError as exc:
+                    _echo_err(f"ingest aborted: {exc}")
+                    raise typer.Exit(code=2) from exc
 
         if today:
             day = _parse_date(date)
@@ -286,7 +300,7 @@ def backtest_cmd(
     else:
         engine = _engine(cfg)
         with engine.connect() as conn:
-            matches = load_matches(conn, finished_only=True)
+            matches = load_matches(conn, finished_only=True, book=cfg.benchmark_book)
         if matches.empty:
             _echo_err("no finished matches -- run `champmodel ingest --backfill` first")
             raise typer.Exit(code=1)
@@ -364,7 +378,7 @@ def tune_cmd(
     else:
         engine = _engine(cfg)
         with engine.connect() as conn:
-            matches = load_matches(conn, finished_only=True)
+            matches = load_matches(conn, finished_only=True, book=cfg.benchmark_book)
         if matches.empty:
             _echo_err("no finished matches -- run `champmodel ingest --backfill` first")
             raise typer.Exit(code=1)
@@ -452,7 +466,7 @@ def predict_cmd(
         availability_index = build_index(overrides, params, day) if overrides or \
             not avail_report.missing_file else None
 
-        fixtures = load_fixtures(conn, day)
+        fixtures = load_fixtures(conn, day, book=cfg.benchmark_book)
         history = load_matches(conn, finished_only=True, until=day - dt.timedelta(days=1),
                                with_odds=False)
 
